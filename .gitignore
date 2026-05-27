@@ -1,0 +1,98 @@
+# =================================================
+# FRONTEND (React / Vite)
+# =================================================
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+build/
+out/
+
+# Vite cache
+.vite/
+
+# =================================================
+# BACKEND (Python / FastAPI)
+# =================================================
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Test/cache tools
+.pytest_cache/
+.mypy_cache/
+
+# Local databases
+*.sqlite3
+*.db
+
+# =================================================
+# Environment variables
+# =================================================
+
+.env
+.env.*
+!.env.example
+
+# =================================================
+# Logs
+# =================================================
+
+logs/
+*.log
+*.err
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# =================================================
+# Generated backend output
+# =================================================
+
+output/*
+!output/.gitkeep
+
+# =================================================
+# IDE / Editors
+# =================================================
+
+.vscode/*
+!.vscode/extensions.json
+
+.idea/
+
+# =================================================
+# OS files
+# =================================================
+
+.DS_Store
+Thumbs.db
+
+# =================================================
+# Claude / AI assistant files
+# =================================================
+
+.claude/
+
+# =================================================
+# Temporary / backup files
+# =================================================
+
+*.tmp
+*.temp
+*.bak
+*.sw?

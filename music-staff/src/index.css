@@ -1,0 +1,27 @@
+:root {
+  --bg: #F6F4F4;
+  --panel: #FFFFFF;
+  --container: #FCFBFB;
+
+  --primary: #A63A46;
+  --primary-hover: #BB4A57;
+  --primary-light: #E8C8CC;
+
+  --accent: #D8A8AF;
+
+  --text: #1F1B1C;
+  --text-secondary: #5F5658;
+  --text-muted: #94898C;
+
+  --border: #E7DCDD;
+
+  --staff-bg: #FFFFFF; /* залишається явно білим */
+  --staff-border: #D8C6C9;
+
+  --danger: #B54855;
+  --danger-hover: #C95C68;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; }
+#root { min-height: 100svh; }
