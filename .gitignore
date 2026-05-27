@@ -63,8 +63,8 @@ lerna-debug.log*
 # Generated backend output
 # =================================================
 
-output/*
-!output/.gitkeep
+music-staff-backend/output/*
+!music-staff-backend/output/.gitkeep
 
 # =================================================
 # IDE / Editors
