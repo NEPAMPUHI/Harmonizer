@@ -1,6 +1,38 @@
 import { useState, useRef, useEffect } from 'react'
 import KeyPicker from './KeyPicker'
 
+// Number spinner whose value can only be changed via the browser's up/down arrows.
+// Keyboard text entry is blocked so leading-zero strings ("03", "00000") are impossible.
+// The onChange prop receives a clamped integer in [0, maxValue].
+function AnacrusisInput({ value, maxValue, onChange }) {
+  const safeMax = Math.max(0, maxValue)
+  return (
+    <input
+      type="number"
+      className="anacrusis-input"
+      value={value}
+      min={0}
+      max={safeMax}
+      onChange={e => {
+        const parsed = parseInt(e.target.value, 10)
+        if (!isNaN(parsed)) onChange(Math.max(0, Math.min(safeMax, parsed)))
+      }}
+      onKeyDown={e => {
+        // Allow only Tab and the arrow keys that drive the native spinner.
+        if (e.key !== 'Tab' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
+          e.preventDefault()
+        }
+      }}
+    />
+  )
+}
+
+const SCALE_MODES = [
+  { id: 'natural',  label: 'натуральний' },
+  { id: 'harmonic', label: 'гармонічний' },
+  { id: 'melodic',  label: 'мелодичний' },
+]
+
 const DURATION_SYMBOLS = { w: '𝅝', h: '𝅗𝅥', q: '♩', '8': '♪', '16': '\u{1D161}' }
 const REST_SYMBOLS     = { w: '𝄻', h: '𝄼', q: '𝄽', '8': '𝄾', '16': '𝄿' }
 const ACCIDENTALS = [
@@ -99,134 +131,158 @@ export default function NoteToolbar({
   isDotted, onToggleDot,
   isTie, onToggleTie,
   isTriplet, tripletCount, onToggleTriplet,
-  anacrusis, anacruisTicks, normalCap, onChangeAnacrusis,
+  anacrusis, anacruisTicks, maxAnacruisTicks, onChangeAnacrusis,
   tonality, onSelectTonality,
   onSelectTimeSig, onStartDrag, onUndo, onClear,
   onAddMeasure, onRemoveMeasure,
   canUndo, canRemoveMeasure,
   isHarmonize, clefMode, onSelectClef,
-  isEditMode, onToggleEditMode,
-  onDeleteSelected, canDeleteNote = false,
+  isEditMode, hasSelectedNote, onToggleEditMode,
   onExport,
+  selectedModes = ['natural', 'harmonic', 'melodic'],
+  onToggleMode,
   onHarmonize, isHarmonizing,
   isCheck, onCheck, isChecking,
   forbiddenRules = [], selectedForbiddenRules = [], onToggleForbiddenRule,
   allowedChords  = [], selectedAllowedChords  = [], onToggleAllowedChord,
-  measuresCount = 1, onSetMeasureCount,
+  measuresCount = 1, canAddMeasure = true, onSetMeasureCount,
 }) {
-  const rawSum = anacrusis.q * 4 + anacrusis.e * 2 + anacrusis.s * 1
-  const anacruisInvalid = anacrusis.enabled && rawSum > 0 && anacruisTicks === 0
 
   const [measureInputVal, setMeasureInputVal] = useState(String(measuresCount))
+  const isMeasureInputFocused = useRef(false)
 
   useEffect(() => {
-    setMeasureInputVal(String(measuresCount))
+    if (!isMeasureInputFocused.current) {
+      setMeasureInputVal(String(measuresCount))
+    }
   }, [measuresCount])
 
   const MAX_MEASURES = 64
 
   function handleMeasureInputChange(e) {
     const val = e.target.value
+    if (val !== '' && !/^\d+$/.test(val)) return
     setMeasureInputVal(val)
-    if (onSetMeasureCount) {
-      const parsed = parseInt(val) || 0
-      const clamped = Math.min(MAX_MEASURES, Math.max(1, parsed))
-      onSetMeasureCount(clamped)
-    }
+  }
+
+  function handleMeasureInputFocus(e) {
+    isMeasureInputFocused.current = true
+    e.target.select()
   }
 
   function handleMeasureInputBlur() {
-    setMeasureInputVal(String(measuresCount))
+    isMeasureInputFocused.current = false
+    const parsed = parseInt(measureInputVal, 10)
+    const clamped = !isNaN(parsed) && parsed >= 1 ? Math.min(MAX_MEASURES, parsed) : 1
+    if (onSetMeasureCount) onSetMeasureCount(clamped)
+    setMeasureInputVal(String(clamped))
   }
+
+  const measureCountRow = (
+    <div className="measure-count-row">
+      <button
+        className="btn-measure-step"
+        onClick={() => onRemoveMeasure && onRemoveMeasure()}
+        disabled={!canRemoveMeasure}
+        title="Зменшити кількість тактів"
+      >−</button>
+      <input
+        type="text"
+        inputMode="numeric"
+        className="measure-count-input"
+        value={measureInputVal}
+        onChange={handleMeasureInputChange}
+        onFocus={handleMeasureInputFocus}
+        onBlur={handleMeasureInputBlur}
+      />
+      <button
+        className="btn-measure-step"
+        onClick={() => onAddMeasure && onAddMeasure()}
+        disabled={!canAddMeasure}
+        title="Збільшити кількість тактів"
+      >+</button>
+    </div>
+  )
+
+  const ctrlButtons = (
+    <div className="toolbar-ctrl-buttons">
+      <button
+        className="btn-ctrl btn-ctrl-undo"
+        onClick={onUndo}
+        disabled={!canUndo}
+        title="Скасувати останню дію"
+      >↩</button>
+      <button
+        className={`btn-ctrl btn-ctrl-edit${isEditMode ? ' active' : ''}`}
+        onClick={onToggleEditMode}
+        title="Режим редагування"
+      >✎ Редагувати</button>
+      <button
+        className="btn-ctrl btn-ctrl-clear"
+        onClick={onClear}
+        title={isEditMode && hasSelectedNote ? 'Видалити ноту' : 'Очистити нотний стан'}
+      >🗑</button>
+    </div>
+  )
 
   return (
     <div className="toolbar">
 
-      {/* Voice — harmonize only */}
+      {/* ─── Col 1 (harmonize): Voice + MeasureCount ─────────────── */}
       {isHarmonize && (
-        <div className="toolbar-group">
-          <span className="toolbar-label">Голос</span>
-          <div className="clef-switcher">
-            <button
-              className={`btn-note${clefMode === 'treble' ? ' active' : ''}`}
-              onClick={() => onSelectClef('treble')}
-            >𝄞 Мелодія</button>
-            <button
-              className={`btn-note${clefMode === 'bass' ? ' active' : ''}`}
-              onClick={() => onSelectClef('bass')}
-            >𝄢 Бас</button>
+        <div className="toolbar-col">
+          <div className="toolbar-group">
+            <span className="toolbar-label">Голос</span>
+            <div className="clef-switcher">
+              <button
+                className={`btn-note${clefMode === 'treble' ? ' active' : ''}`}
+                onClick={() => onSelectClef('treble')}
+              >𝄞 Мелодія</button>
+              <button
+                className={`btn-note${clefMode === 'bass' ? ' active' : ''}`}
+                onClick={() => onSelectClef('bass')}
+              >𝄢 Бас</button>
+            </div>
+          </div>
+          <div className="toolbar-group">
+            <span className="toolbar-label">Кількість тактів</span>
+            {measureCountRow}
           </div>
         </div>
       )}
 
-      {/* Main 3-column area */}
-      <div className="toolbar-main-cols">
-
-        {/* Col 1: Tonality + Measure count (harmonize only) + Controls */}
-        <div className="toolbar-group-stack">
-          <div className="toolbar-group">
-            <span className="toolbar-label">Тональність</span>
-            <KeyPicker value={tonality} onChange={onSelectTonality} />
-          </div>
-          {(isHarmonize || isCheck) && (
-            <div className="toolbar-group">
-              <span className="toolbar-label">Кількість тактів</span>
-              <div className="measure-count-row">
-                <button
-                  className="btn-measure-step"
-                  onClick={() => onRemoveMeasure && onRemoveMeasure()}
-                  disabled={!canRemoveMeasure}
-                  title="Зменшити кількість тактів"
-                >−</button>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="measure-count-input"
-                  value={measureInputVal}
-                  onChange={handleMeasureInputChange}
-                  onBlur={handleMeasureInputBlur}
-                />
-                <button
-                  className="btn-measure-step"
-                  onClick={() => onAddMeasure && onAddMeasure()}
-                  disabled={measuresCount >= MAX_MEASURES}
-                  title="Збільшити кількість тактів"
-                >+</button>
-              </div>
-            </div>
-          )}
-          <div className="toolbar-ctrl-buttons">
-            <button
-              className="btn-ctrl btn-ctrl-undo"
-              onClick={onUndo}
-              disabled={!canUndo}
-              title="Скасувати останню дію"
-            >↩</button>
-            <button
-              className={`btn-ctrl btn-ctrl-edit${isEditMode ? ' active' : ''}`}
-              onClick={onToggleEditMode}
-              title="Режим редагування"
-            >✎</button>
-            <button
-              className="btn-ctrl btn-ctrl-delete"
-              onClick={onDeleteSelected}
-              disabled={!isEditMode || !canDeleteNote}
-              title="Видалити вибрану ноту або паузу"
-            >⌫</button>
-            <button
-              className="btn-ctrl btn-ctrl-clear"
-              onClick={onClear}
-              title="Очистити нотний стан"
-            >🗑</button>
-          </div>
+      {/* ─── Col 2/1: Tonality + [Mode (harmonize) | MeasureCount (check)] ── */}
+      <div className="toolbar-col">
+        <div className="toolbar-group">
+          <span className="toolbar-label">Тональність</span>
+          <KeyPicker value={tonality} onChange={onSelectTonality} />
         </div>
-
-        {/* Col 2: Time signature + Anacrusis */}
-        <div className="toolbar-group-stack">
+        {isHarmonize && (
           <div className="toolbar-group">
-            <span className="toolbar-label">Розмір</span>
-            <TimeSigPicker value={timeSignature} onChange={onSelectTimeSig} options={timeSigs} />
+            <span className="toolbar-label">Лад</span>
+            <MultiCheckDropdown
+              label="Лад"
+              options={SCALE_MODES}
+              selected={selectedModes}
+              onToggle={onToggleMode}
+            />
           </div>
+        )}
+        {isCheck && (
+          <div className="toolbar-group">
+            <span className="toolbar-label">Кількість тактів</span>
+            {measureCountRow}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Col 3/2: TimeSig + Anacrusis ──────────────────────────── */}
+      <div className="toolbar-col">
+        <div className="toolbar-group">
+          <span className="toolbar-label">Розмір</span>
+          <TimeSigPicker value={timeSignature} onChange={onSelectTimeSig} options={timeSigs} />
+        </div>
+        <div className="anacrusis-group">
           <label className="anacrusis-check">
             <input
               type="checkbox"
@@ -238,127 +294,111 @@ export default function NoteToolbar({
           {anacrusis.enabled && (
             <div className="anacrusis-row">
               <label className="anacrusis-field">
-                <span>♩</span>
-                <input
-                  type="number" min="0" max="99"
-                  value={anacrusis.q}
-                  onChange={e => onChangeAnacrusis({ ...anacrusis, q: Math.max(0, parseInt(e.target.value) || 0) })}
-                />
-              </label>
-              <label className="anacrusis-field">
                 <span>♪</span>
-                <input
-                  type="number" min="0" max="99"
+                <AnacrusisInput
                   value={anacrusis.e}
-                  onChange={e => onChangeAnacrusis({ ...anacrusis, e: Math.max(0, parseInt(e.target.value) || 0) })}
+                  maxValue={Math.floor((maxAnacruisTicks - anacrusis.s) / 2)}
+                  onChange={newE => onChangeAnacrusis({ ...anacrusis, e: newE })}
                 />
               </label>
               <label className="anacrusis-field">
                 <span>{'\u{1D161}'}</span>
-                <input
-                  type="number" min="0" max="99"
+                <AnacrusisInput
                   value={anacrusis.s}
-                  onChange={e => onChangeAnacrusis({ ...anacrusis, s: Math.max(0, parseInt(e.target.value) || 0) })}
+                  maxValue={maxAnacruisTicks - anacrusis.e * 2}
+                  onChange={newS => onChangeAnacrusis({ ...anacrusis, s: newS })}
                 />
               </label>
-              {anacruisInvalid && (
-                <span className="anacrusis-warn">≥ розміру такту</span>
-              )}
             </div>
           )}
         </div>
-
-        {/* Col 3+: Note symbols (4×5 grid) + Restrictions */}
-        <div className="toolbar-notes-and-rules">
-          <div className="toolbar-group">
-            <span className="toolbar-label">Нотні символи</span>
-            <div className="note-symbols-grid">
-
-              {/* Row 1: dot | tie | triplet | [progress or empty] | empty */}
-              <button
-                className={`btn-dur${isDotted ? ' active' : ''}`}
-                title="Точка (×1.5)"
-                disabled={selected.duration === '16' || isTriplet}
-                onClick={onToggleDot}
-              >•</button>
-              <button
-                className={`btn-dur${isTie ? ' active' : ''}`}
-                title="Ліга"
-                onClick={onToggleTie}
-              >⌢</button>
-              <button
-                className={`btn-dur${isTriplet ? ' active' : ''}`}
-                title="Тріоль — три ноти замість двох (3:2)"
-                onClick={onToggleTriplet}
-                style={{ fontSize: '0.9rem', fontWeight: 700 }}
-              >³</button>
-              {isTriplet && tripletCount > 0
-                ? <div className="triplet-progress">{tripletCount}/3</div>
-                : <div className="note-sym-empty" />
-              }
-              <div className="note-sym-empty" />
-
-              {/* Row 2: accidentals */}
-              {ACCIDENTALS.map(a => (
-                <button
-                  key={a.id}
-                  className={`btn-dur${accidental === a.id ? ' active' : ''}`}
-                  title={a.title}
-                  onClick={() => onSelectAccidental(a.id)}
-                >{a.label}</button>
-              ))}
-
-              {/* Row 3: rests */}
-              {durations.map(d => (
-                <button
-                  key={`r-${d.id}`}
-                  className={`btn-dur ${isRest && selected.duration === d.id ? 'active' : ''}`}
-                  title={`${d.label} (пауза)`}
-                  onClick={() => onStartDrag(d.id, true)}
-                >{REST_SYMBOLS[d.id]}</button>
-              ))}
-
-              {/* Row 4: notes */}
-              {durations.map(d => (
-                <button
-                  key={`n-${d.id}`}
-                  className={`btn-dur ${!isRest && selected.duration === d.id ? 'active' : ''}`}
-                  title={d.label}
-                  onClick={() => onStartDrag(d.id, false)}
-                >{DURATION_SYMBOLS[d.id]}</button>
-              ))}
-
-            </div>
-          </div>
-
-          <div className="toolbar-group-stack">
-            <div className="toolbar-group">
-              <span className="toolbar-label">Заборони</span>
-              <MultiCheckDropdown
-                label="Заборони"
-                options={forbiddenRules}
-                selected={selectedForbiddenRules}
-                onToggle={onToggleForbiddenRule}
-              />
-            </div>
-
-            <div className="toolbar-group">
-              <span className="toolbar-label">Допустимі акорди</span>
-              <MultiCheckDropdown
-                label="Допустимі акорди"
-                options={allowedChords}
-                selected={selectedAllowedChords}
-                onToggle={onToggleAllowedChord}
-              />
-            </div>
-          </div>
-        </div>
-
       </div>
 
-      {/* Harmonize — rightmost */}
+      {/* ─── Col 4/3: Note symbols ─────────────────────────────────── */}
+      <div className="toolbar-col">
+        <div className="toolbar-group">
+          <span className="toolbar-label">Нотні символи</span>
+          <div className="note-symbols-grid">
+
+            {/* Row 1: accidentals + triplet */}
+            {ACCIDENTALS.map(a => (
+              <button
+                key={a.id}
+                className={`btn-dur${accidental === a.id ? ' active' : ''}`}
+                title={a.title}
+                onClick={() => onSelectAccidental(a.id)}
+              >{a.label}</button>
+            ))}
+            <button
+              className={`btn-dur${isTriplet ? ' active' : ''}`}
+              title="Тріоль — три ноти замість двох (3:2)"
+              onClick={onToggleTriplet}
+              style={{ fontSize: isTriplet && tripletCount > 0 ? '0.7rem' : '0.9rem', fontWeight: 700 }}
+            >{isTriplet && tripletCount > 0 ? `${tripletCount}/3` : '³'}</button>
+
+            {/* Row 2: rests + tie */}
+            {durations.map(d => (
+              <button
+                key={`r-${d.id}`}
+                className={`btn-dur ${isRest && selected.duration === d.id ? 'active' : ''}`}
+                title={`${d.label} (пауза)`}
+                onClick={() => onStartDrag(d.id, true)}
+              >{REST_SYMBOLS[d.id]}</button>
+            ))}
+            <button
+              className={`btn-dur${isTie ? ' active' : ''}`}
+              title="Ліга"
+              onClick={onToggleTie}
+            >⌢</button>
+
+            {/* Row 3: notes + dot */}
+            {durations.map(d => (
+              <button
+                key={`n-${d.id}`}
+                className={`btn-dur ${!isRest && selected.duration === d.id ? 'active' : ''}`}
+                title={d.label}
+                onClick={() => onStartDrag(d.id, false)}
+              >{DURATION_SYMBOLS[d.id]}</button>
+            ))}
+            <button
+              className={`btn-dur${isDotted ? ' active' : ''}`}
+              title="Точка (×1.5)"
+              disabled={selected.duration === '16' || isTriplet}
+              onClick={onToggleDot}
+            >•</button>
+
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Col 5/4: Restrictions + [Allowed chords (harmonize) | Ctrl buttons (check)] ── */}
+      <div className="toolbar-col">
+        <div className="toolbar-group">
+          <span className="toolbar-label">Заборони</span>
+          <MultiCheckDropdown
+            label="Заборони"
+            options={forbiddenRules}
+            selected={selectedForbiddenRules}
+            onToggle={onToggleForbiddenRule}
+          />
+        </div>
+        {isHarmonize && (
+          <div className="toolbar-group">
+            <span className="toolbar-label">Допустимі акорди</span>
+            <MultiCheckDropdown
+              label="Допустимі акорди"
+              options={allowedChords}
+              selected={selectedAllowedChords}
+              onToggle={onToggleAllowedChord}
+            />
+          </div>
+        )}
+        {isCheck && ctrlButtons}
+      </div>
+
+      {/* ─── Col 6 (harmonize): Harmonize button + Ctrl buttons ──────── */}
       {isHarmonize && (
-        <div className="toolbar-group actions toolbar-harmonize-right">
+        <div className="toolbar-col">
           <button
             className="btn-action btn-harmonize"
             onClick={onHarmonize}
@@ -367,12 +407,13 @@ export default function NoteToolbar({
           >
             {isHarmonizing ? 'Гармонізую...' : 'Гармонізувати!'}
           </button>
+          {ctrlButtons}
         </div>
       )}
 
-      {/* Check — rightmost */}
+      {/* ─── Col 5 (check): Check button ─────────────────────────────── */}
       {isCheck && (
-        <div className="toolbar-group actions toolbar-harmonize-right">
+        <div className="toolbar-col">
           <button
             className="btn-action btn-check"
             onClick={onCheck}

@@ -1,5 +1,5 @@
 const LINKS = [
-  { id: 'home',     label: 'Головна' },
+  { id: 'home',     label: 'Гармонізатор' },
   { id: 'about',    label: 'Про проєкт' },
   { id: 'contacts', label: 'Контакти' },
 ]

@@ -3,6 +3,8 @@
   --panel: #FFFFFF;
   --container: #FCFBFB;
 
+  --nav-bg: #6B1F28;
+
   --primary: #A63A46;
   --primary-hover: #BB4A57;
   --primary-light: #E8C8CC;
@@ -23,5 +25,10 @@
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
 body { margin: 0; }
-#root { min-height: 100svh; }
+#root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}

@@ -43,7 +43,7 @@ function noteTicks(note) {
  * @param {{ measures, timeSignature, tonality, anacruisTicks }} score
  * @returns {object} MusicXML-ready JSON
  */
-export function scoreToJson({ measures, timeSignature, tonality, anacruisTicks }) {
+export function scoreToJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes }) {
   const [beats, beatType] = timeSignature.split('/').map(Number)
   const normalCap = (beats * 16) / beatType
 
@@ -137,6 +137,7 @@ export function scoreToJson({ measures, timeSignature, tonality, anacruisTicks }
     keySignature: {
       fifths: tonality.acc,
       mode:   tonality.major ? 'major' : 'minor',
+      modes:  selectedModes ?? ['natural'],
     },
     anacruisTicks,
     measures: jsonMeasures,

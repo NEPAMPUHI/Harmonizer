@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Renderer, Stave, StaveNote, Voice, Formatter, Beam, Tuplet,
+  Renderer, Stave, StaveNote, GhostNote, Voice, Formatter, Beam, Tuplet,
   StaveConnector, BarlineType, Accidental, StaveTie, Dot,
 } from 'vexflow'
 import { measureCapacity, usedTicks, noteTicks, NOTE_TICKS, fillRests } from './capacity'
@@ -9,9 +9,11 @@ import { KEY_ACC_SIGNED, getKeyAccidentals, getEffectiveSemitones } from './pitc
 // ── Layout constants ────────────────────────────────────────────
 const STAVE_X  = 30
 const NEXT_W   = 280
-const TREBLE_Y = 20
-const BASS_Y   = 92
-const ROW_H    = 200
+const TREBLE_Y         = 20
+const BASS_Y_HARMONIZE = 162   // was 92; +70 px (2 stem lengths) vs original
+const BASS_Y_CHECK     = 162   // intra-system gap treble↔bass = 102 px (3 stems); was 197 → −35 px
+const ROW_H_HARMONIZE  = 200   // original row height — no two-voice stem clash in harmonize
+const ROW_H_CHECK      = 305   // inter-system gap bass→treble_next = 123 px (3.5 stems); ROW_H−bassY−20
 
 // ── Dynamic first-measure width ─────────────────────────────────
 const ACC_COUNT = {
@@ -32,7 +34,16 @@ const HALF_STEP_PX       = 5    // px per diatonic step
 // ── Pitch math ──────────────────────────────────────────────────
 const DIATONIC   = ['c', 'd', 'e', 'f', 'g', 'a', 'b']
 const BASE_TOTAL = { treble: 4 * 7 + 2, bass: 2 * 7 + 4 }  // E4, G2
-const NOTE_LABELS = { c: 'До', d: 'Ре', e: 'Мі', f: 'Фа', g: 'Соль', a: 'Ля', b: 'Сі' }
+const NOTE_LABELS  = { c: 'До', d: 'Ре', e: 'Мі', f: 'Фа', g: 'Соль', a: 'Ля', b: 'Сі' }
+const VOICE_BADGE  = { soprano: 'S', alto: 'A', tenor: 'T', bass: 'B' }
+
+// Allowed input range per clef (diatonic totals = octave×7 + pitch_index)
+// treble: G3 (3×7+4=25) – C6 (6×7+0=42)
+// bass:   C2 (2×7+0=14) – F4 (4×7+3=31)
+const NOTE_RANGE = {
+  treble: { min: 25, max: 42 },
+  bass:   { min: 14, max: 31 },
+}
 
 function intPosToNote(intPos, clef) {
   const total    = BASE_TOTAL[clef] + intPos
@@ -43,8 +54,46 @@ function intPosToNote(intPos, clef) {
 
 // ── Rest positioning ─────────────────────────────────────────────
 function getRestKey(duration, clef) {
-  if (clef === 'bass') return duration === 'w' ? 'd/3' : 'b/2'
+  if (clef === 'bass') return duration === 'w' ? 'f/3' : 'd/3'
   return duration === 'w' ? 'd/5' : 'b/4'
+}
+
+function diatonicTotalToKey(dt) {
+  const pitchIdx = ((dt % 7) + 7) % 7
+  const octave   = Math.floor(dt / 7)
+  return `${DIATONIC[pitchIdx]}/${octave}`
+}
+
+function keyToDiatonicTotal(key) {
+  const [pitch, octave] = key.split('/')
+  return parseInt(octave) * 7 + DIATONIC.indexOf(pitch)
+}
+
+// Returns the VexFlow key string for lower-voice rests in check mode.
+// Positions them 5 diatonic steps below the lowest pitched note in the upper voice.
+// The caller clamps this against the standard position so the rest never rises above standard.
+// Returns null when the upper voice has no pitched notes (use default positioning).
+function computeLowerVoiceRestKey(upperNotes, clef = 'treble') {
+  if (!upperNotes.length) return null
+  // Include rests: use their standard rest-key position as the reference DT
+  const dts = upperNotes.map(n =>
+    n.isRest
+      ? keyToDiatonicTotal(getRestKey(n.duration, clef))
+      : noteDiatonicTotal(n.pitch, n.octave)
+  )
+  const minDT = Math.min(...dts)
+  return diatonicTotalToKey(minDT - 5)
+}
+
+// Returns the VexFlow key string for upper-voice rests in check mode.
+// Positions them 5 diatonic steps above the highest pitched note in the lower voice.
+// The caller clamps this against the standard position so the rest never falls below standard.
+// Returns null when the lower voice has no pitched notes (use default positioning).
+function computeUpperVoiceRestKey(lowerNotes) {
+  const pitched = lowerNotes.filter(n => !n.isRest)
+  if (!pitched.length) return null
+  const maxDT = Math.max(...pitched.map(n => noteDiatonicTotal(n.pitch, n.octave)))
+  return diatonicTotalToKey(maxDT + 5)
 }
 
 // ── Adaptive measure-width estimation ───────────────────────────
@@ -166,19 +215,279 @@ function precomputeStemDirs(notes, timeSig, clef, isPickup = false, totalTicks =
   return dirs
 }
 
+// ── Check-mode voice gap filler ─────────────────────────────────
+// Inserts auto-rests before, between, and after user notes so the
+// returned array covers exactly [0, capacity) ticks.  Each input note
+// must carry a positionTick field.
+const CHECK_REST_SIZES = [
+  { duration: 'w',  dotted: false, ticks: 16 },
+  { duration: 'h',  dotted: true,  ticks: 12 },
+  { duration: 'h',  dotted: false, ticks:  8 },
+  { duration: 'q',  dotted: true,  ticks:  6 },
+  { duration: 'q',  dotted: false, ticks:  4 },
+  { duration: '8',  dotted: true,  ticks:  3 },
+  { duration: '8',  dotted: false, ticks:  2 },
+  { duration: '16', dotted: false, ticks:  1 },
+]
+
+function fillCheckVoice(notes, capacity) {
+  const result = []
+  let cursor = 0
+  let autoId = 0
+
+  function addGap(ticks) {
+    let rem = Math.round(ticks * 10000) / 10000
+    for (const { duration, dotted, ticks: t } of CHECK_REST_SIZES) {
+      while (rem >= t - 0.0001) {
+        result.push({ duration, dotted: dotted || undefined,
+          isRest: true, pitch: 'b', octave: 4, id: `cr-auto-${autoId++}` })
+        rem = Math.round((rem - t) * 10000) / 10000
+      }
+    }
+  }
+
+  for (const note of notes) {
+    const tick = note.positionTick ?? cursor
+    const gap  = Math.round((tick - cursor) * 10000) / 10000
+    if (gap > 0.0001) addGap(gap)
+    result.push(note)
+    cursor = Math.round((tick + noteTicks(note)) * 10000) / 10000
+  }
+
+  const tail = Math.round((capacity - cursor) * 10000) / 10000
+  if (tail > 0.0001) addGap(tail)
+
+  return result
+}
+
+// ── Check-mode paired voice filler ──────────────────────────────
+// For a clef's two voices, distributes rests so that:
+//   • The exclusive region (one voice has user content, the other doesn't)
+//     gets auto-rests only in the voice that's absent.  Lower-voice rests
+//     are tagged { autoRest: true } and shifted down by createVoice.
+//   • The shared region (neither voice has user content yet) renders as a
+//     single visible rest in the UPPER voice { sharedRest: true } at the
+//     standard staff position, while the LOWER voice gets invisible
+//     GhostNotes { ghostNote: true } so the formatter can still align them.
+// fillCheckVoice is kept for computeFirstNoteSvgX (preview positioning).
+function fillCheckVoicePair(upperRawNotes, lowerRawNotes, capacity) {
+  let autoId = 0
+
+  const calcEnd = notes => notes.reduce((max, n) => {
+    const end = Math.round(((n.positionTick ?? 0) + noteTicks(n)) * 10000) / 10000
+    return Math.max(max, end)
+  }, 0)
+
+  const upperEnd    = calcEnd(upperRawNotes)
+  const lowerEnd    = calcEnd(lowerRawNotes)
+  const sharedStart = Math.max(upperEnd, lowerEnd)
+  const sharedDur   = Math.round((capacity - sharedStart) * 10000) / 10000
+
+  function makeItems(ticks, flags) {
+    const arr = []
+    let rem = Math.round(ticks * 10000) / 10000
+    for (const { duration, dotted, ticks: t } of CHECK_REST_SIZES) {
+      while (rem >= t - 0.0001) {
+        arr.push({
+          duration, dotted: dotted || undefined,
+          isRest: true, pitch: 'b', octave: 4,
+          id: `cr-auto-${autoId++}`, ...flags,
+        })
+        rem = Math.round((rem - t) * 10000) / 10000
+      }
+    }
+    return arr
+  }
+
+  function fillUserSection(notes) {
+    const result = []
+    let cursor = 0
+    for (const note of notes) {
+      const tick = note.positionTick ?? cursor
+      const gap  = Math.round((tick - cursor) * 10000) / 10000
+      if (gap > 0.0001) result.push(...makeItems(gap, { autoRest: true }))
+      result.push(note)
+      cursor = Math.round((tick + noteTicks(note)) * 10000) / 10000
+    }
+    return result
+  }
+
+  const dUpper = [
+    ...fillUserSection(upperRawNotes),
+    ...(lowerEnd > upperEnd ? makeItems(lowerEnd - upperEnd, { autoRest: true }) : []),
+    ...(sharedDur > 0.0001  ? makeItems(sharedDur,          { sharedRest: true }) : []),
+  ]
+
+  const dLower = [
+    ...fillUserSection(lowerRawNotes),
+    ...(upperEnd > lowerEnd ? makeItems(upperEnd - lowerEnd, { autoRest: true }) : []),
+    ...(sharedDur > 0.0001  ? makeItems(sharedDur,          { ghostNote: true }) : []),
+  ]
+
+  return { dUpper, dLower }
+}
+
+// Returns the SVG X where a note with the given duration would land at tick=0
+// of an empty check-mode measure. Mirrors the full 4-voice format the main
+// render uses (all other voices filled with auto-rests) so the returned X
+// matches getAbsoluteX() pixel-exactly.
+function computeFirstNoteSvgX(noteStartX, noteEndX, duration, dotted, timeSig, mCap, clef) {
+  const dummy = {
+    id: '__preview__', pitch: 'c', octave: 4,
+    duration, dotted: dotted || undefined,
+    stemDir: 1, positionTick: 0, isRest: false,
+  }
+  // Put the dummy note in the target clef's upper voice; all others are auto-rest.
+  const tSop  = fillCheckVoice(clef === 'treble' ? [dummy] : [], mCap)
+  const tAlt  = fillCheckVoice([], mCap)
+  const bTen  = fillCheckVoice([], mCap)
+  const bBas  = fillCheckVoice(clef === 'bass'   ? [dummy] : [], mCap)
+
+  const tv  = createVoice(tSop, timeSig, 'treble', tSop.map(() =>  1))
+  const tv2 = createVoice(tAlt, timeSig, 'treble', tAlt.map(() => -1))
+  const bv  = createVoice(bTen, timeSig, 'bass',   bTen.map(() =>  1))
+  const bv2 = createVoice(bBas, timeSig, 'bass',   bBas.map(() => -1))
+
+  const allVoices = [tv, tv2, bv, bv2].filter(Boolean).map(x => x.voice)
+  if (!allVoices.length) return null
+
+  const availW = Math.max(10, noteEndX - noteStartX - 8)
+  const fmt    = new Formatter()
+  allVoices.forEach(v => fmt.joinVoices([v]))
+  fmt.format(allVoices, availW)
+
+  const { list, map } = fmt.getTickContexts()
+  if (!list?.length) return null
+
+  const lastCtx  = map[list[list.length - 1]]
+  const maxRight = lastCtx.getX() + lastCtx.getWidth()
+  if (maxRight > availW) {
+    const scale = availW / maxRight
+    list.forEach(t => map[t].setX(map[t].getX() * scale))
+  }
+
+  // Stave.padding is a VexFlow font metric (12px for Bravura) added by getAbsoluteX()
+  // as: tc.getX() + stave.getNoteStartX() + Stave.padding.
+  // Derive it from Stave's public statics to avoid hardcoding.
+  const stavePadding = Stave.defaultPadding - Stave.rightPadding
+
+  const tc0 = map[list[0]]
+  if (list.length === 1) {
+    return noteStartX + tc0.getX() + stavePadding
+  }
+  const leftPad = tc0.getX()
+  const shift   = Math.floor(leftPad / 2)
+  return noteStartX + tc0.getX() - shift + stavePadding
+}
+
+// ── Check-mode voice-pair overlap helpers ───────────────────────
+const NOTE_HEAD_W = 10          // px to shift upper-voice note for side-by-side display
+const SHARED_HEAD_DURS_SET = new Set(['q', '8', '16'])
+
+// Returns:
+//   suppressAccIds    — lower-voice note IDs whose accidental is hidden (unison: upper already shows it)
+//   xShiftUpperIds    — upper-voice note ID → px to shift the notehead right (always NOTE_HEAD_W)
+//   xShiftLowerIds    — lower-voice note ID → px to shift the notehead right
+//   accPushLeftUpper  — upper-voice note IDs whose accidental needs an extra ACC_EXTRA leftward push
+//   accPushLeftLower  — lower-voice note IDs whose accidental needs an extra ACC_EXTRA leftward push
+//
+// Key insight: note.setXShift() moves the notehead only. Accidentals are positioned relative to
+// getAbsoluteX() which excludes the note's xShift, so accidentals stay at the tick's X position
+// regardless of notehead shift. Single-accidental cases need no adjustment (the acc naturally
+// sits left of both noteheads). Only both-accidentals cases need one acc pushed further left.
+//
+// Standard order: lower LEFT (tick X), upper RIGHT (shifted by NOTE_HEAD_W).
+// Inverted order (lo has dot, hi doesn't): upper LEFT (tick X), lower RIGHT (shifted).
+function computeVoicePairOverlaps(upperRaw, lowerRaw) {
+  const suppressAccIds   = new Set()
+  const xShiftUpperIds   = new Map()
+  const xShiftLowerIds   = new Map()
+  const accPushLeftUpper = new Set()
+  const accPushLeftLower = new Set()
+
+  for (const hi of upperRaw) {
+    if (hi.isRest || hi.positionTick == null) continue
+    for (const lo of lowerRaw) {
+      if (lo.isRest || lo.positionTick == null) continue
+      if (hi.positionTick !== lo.positionTick) continue
+      const hiDT = noteDiatonicTotal(hi.pitch, hi.octave)
+      const loDT = noteDiatonicTotal(lo.pitch, lo.octave)
+      const diff  = hiDT - loDT
+
+      if (diff === 0) {
+        // Unison – suppress duplicate accidental on the lower-voice note
+        if (lo.accidental) suppressAccIds.add(lo.id)
+        // Decide shared-head vs. side-by-side for different durations
+        if (hi.duration !== lo.duration) {
+          const bothInSet = SHARED_HEAD_DURS_SET.has(hi.duration) && SHARED_HEAD_DURS_SET.has(lo.duration)
+          // Side-by-side when: not both in {q,8,16}, OR both in set but exactly one is dotted
+          const needSideBySide = !bothInSet || (!!hi.dotted !== !!lo.dotted)
+          if (needSideBySide) {
+            if (lo.dotted && !hi.dotted) {
+              // Inverted: upper LEFT (tick X), lower RIGHT — lo_acc is suppressed, no overlap issue
+              xShiftLowerIds.set(lo.id, NOTE_HEAD_W)
+            } else {
+              // Standard: lower LEFT (tick X), upper RIGHT — lo_acc is suppressed, no overlap issue
+              xShiftUpperIds.set(hi.id, NOTE_HEAD_W)
+            }
+          }
+        }
+      } else if (diff === 1) {
+        if (lo.dotted && !hi.dotted) {
+          // Inverted: upper LEFT (tick X), lower RIGHT
+          xShiftLowerIds.set(lo.id, NOTE_HEAD_W)
+          // Both at tick X: only need separation when BOTH have accidentals
+          if (hi.accidental && lo.accidental) accPushLeftUpper.add(hi.id)
+        } else {
+          // Standard: lower LEFT (tick X), upper RIGHT
+          xShiftUpperIds.set(hi.id, NOTE_HEAD_W)
+          // Both at tick X: only need separation when BOTH have accidentals
+          if (hi.accidental && lo.accidental) accPushLeftLower.add(lo.id)
+        }
+      } else if (diff > 1 && diff < 7) {
+        // Within octave but not adjacent: noteheads are on different lines so no head shift
+        // needed, but both accidentals land at the same tick X and overlap each other.
+        // Standard order: lo_acc further left, hi_acc closer to noteheads.
+        if (hi.accidental && lo.accidental) accPushLeftLower.add(lo.id)
+      }
+    }
+  }
+
+  return { suppressAccIds, xShiftUpperIds, xShiftLowerIds, accPushLeftUpper, accPushLeftLower }
+}
+
 // ── VexFlow helpers ─────────────────────────────────────────────
 function parseTimeSig(ts) {
   const [n, d] = ts.split('/').map(Number)
   return { num_beats: n, beat_value: d }
 }
 
-function createVoice(notes, timeSig, clef = 'treble', stemDirs = null) {
+function createVoice(notes, timeSig, clef = 'treble', stemDirs = null, suppressAccIds = null, restKeyOverride = null, restKeyUpperOverride = null) {
   if (!notes.length) return null
   const { num_beats, beat_value } = parseTimeSig(timeSig)
   const vexNotes = notes.map((n, i) => {
     const baseDur = n.duration + (n.dotted ? 'd' : '')
+    if (n.ghostNote) {
+      return new GhostNote({ duration: baseDur })
+    }
     if (n.isRest) {
-      const rest = new StaveNote({ keys: [getRestKey(n.duration, clef)], duration: baseDur + 'r', clef })
+      let restKey = getRestKey(n.duration, clef)
+      if (!n.sharedRest && restKeyOverride) {
+        const standardDT = keyToDiatonicTotal(restKey)
+        let overrideDT   = keyToDiatonicTotal(restKeyOverride)
+        // Whole and half rests look correct only on staff lines (even DT in treble/bass).
+        // If the shifted position lands on a space, snap up one step to the nearest line
+        // so the rest retains its correct visual appearance (hanging/sitting on a line).
+        if ((n.duration === 'w' || n.duration === 'h') && overrideDT % 2 !== 0) overrideDT += 1
+        if (overrideDT < standardDT) restKey = diatonicTotalToKey(overrideDT)
+      }
+      if (!n.sharedRest && restKeyUpperOverride) {
+        const standardDT = keyToDiatonicTotal(restKey)
+        let overrideDT   = keyToDiatonicTotal(restKeyUpperOverride)
+        if ((n.duration === 'w' || n.duration === 'h') && overrideDT % 2 !== 0) overrideDT += 1
+        if (overrideDT > standardDT) restKey = diatonicTotalToKey(overrideDT)
+      }
+      const rest = new StaveNote({ keys: [restKey], duration: baseDur + 'r', clef })
       if (n.dotted) rest.addModifier(new Dot(), 0)
       return rest
     }
@@ -186,7 +495,7 @@ function createVoice(notes, timeSig, clef = 'treble', stemDirs = null) {
     const opts = { keys: [`${n.pitch}/${n.octave}`], duration: baseDur, clef, stemDirection: dir }
     const sn = new StaveNote(opts)
     sn.setStemDirection(dir)
-    if (n.accidental) sn.addModifier(new Accidental(n.accidental), 0)
+    if (n.accidental && !suppressAccIds?.has(n.id)) sn.addModifier(new Accidental(n.accidental), 0)
     if (n.dotted) sn.addModifier(new Dot(), 0)
     return sn
   })
@@ -204,19 +513,19 @@ export default function Staff({
   measures, timeSignature, keySignature, drag, onDrop, anacruisTicks = 0,
   selectedNoteId, onSelectNote, onSetNotePitch, showBass = true, singleClef = 'treble',
   isTriplet = false, tripletCount = 0, pendingTriplet = null,
-  onNoteDragStart,
+  onNoteDragStart, isCheckMode = false,
 }) {
   const canvasRef  = useRef(null)
   const wrapperRef = useRef(null)
   const stavesRef  = useRef([])
   const canvasWRef = useRef(0)
   const notePositionsRef   = useRef([])   // { id, svgX, svgY, pitch, octave } after each render
+  const tickPositionsRef   = useRef({})   // "mIdx.clef.tick" → actual VexFlow svgX (check mode)
+  const lastMousePosRef    = useRef(null) // last known mouse {x,y} for post-drop preview refresh
   const noteDragRef        = useRef(null) // { id, startClientY, origPitchIdx, origOctave }
   const noteDragStartedRef = useRef(false)
 
   const [preview,         setPreview]         = useState(null)
-  const [highlightCoords, setHighlightCoords] = useState(null)
-  const [vexRenderCount,  setVexRenderCount]  = useState(0)
   const [isDraggingNote,  setIsDraggingNote]  = useState(false)
   const [containerW,      setContainerW]      = useState(0)
 
@@ -241,6 +550,7 @@ export default function Staff({
     el.innerHTML = ''
     stavesRef.current = []
     notePositionsRef.current = []
+    tickPositionsRef.current = {}
 
     const normalCap  = measureCapacity(timeSignature)
     const hasPickup  = anacruisTicks > 0 && anacruisTicks < normalCap
@@ -318,13 +628,15 @@ export default function Staff({
       measure: measures[measureIdx], measureIdx, staveW,
     })))
 
-    const rowH = showBass ? ROW_H : 120
+    const bassY = isCheckMode ? BASS_Y_CHECK : BASS_Y_HARMONIZE
+    const rowH  = showBass ? (isCheckMode ? ROW_H_CHECK : ROW_H_HARMONIZE) : 120
     const renderer = new Renderer(el, Renderer.Backends.SVG)
     renderer.resize(CANVAS_W, rows.length * rowH + 30)
     const ctx = renderer.getContext()
     ctx.setFont('Arial', 10)
 
-    const tieNotes = { treble: [], bass: [] }
+    const tieNotes      = { treble: [], bass: [] }
+    const checkTieNotes = { soprano: [], alto: [], tenor: [], bass: [] }
 
     rows.forEach((rowMeasures, rowIdx) => {
       const rowY    = rowIdx * rowH
@@ -346,7 +658,7 @@ export default function Staff({
 
         if (showBass) {
           treble.clef = 'treble'
-          bass = new Stave(curX, rowY + BASS_Y, mW)
+          bass = new Stave(curX, rowY + bassY, mW)
           bass.clef = 'bass'
           treble.setBegBarType(BarlineType.NONE)
           treble.setEndBarType(BarlineType.NONE)
@@ -369,8 +681,10 @@ export default function Staff({
           tStaves.push(treble)
           bStaves.push(bass)
           stavesRef.current.push(
-            { measureIdx: globalIdx, clef: 'treble', staveX: curX, staveW: mW, staveY: rowY + TREBLE_Y },
-            { measureIdx: globalIdx, clef: 'bass',   staveX: curX, staveW: mW, staveY: rowY + BASS_Y   },
+            { measureIdx: globalIdx, clef: 'treble', staveX: curX, staveW: mW, staveY: rowY + TREBLE_Y,
+              noteStartX: treble.getNoteStartX(), noteEndX: treble.getNoteEndX() },
+            { measureIdx: globalIdx, clef: 'bass',   staveX: curX, staveW: mW, staveY: rowY + bassY,
+              noteStartX: bass.getNoteStartX(), noteEndX: bass.getNoteEndX() },
           )
         } else {
           treble.clef = singleClef
@@ -384,7 +698,8 @@ export default function Staff({
           treble.setContext(ctx).draw()
           tStaves.push(treble)
           stavesRef.current.push(
-            { measureIdx: globalIdx, clef: singleClef, staveX: curX, staveW: mW, staveY: rowY + TREBLE_Y },
+            { measureIdx: globalIdx, clef: singleClef, staveX: curX, staveW: mW, staveY: rowY + TREBLE_Y,
+              noteStartX: treble.getNoteStartX(), noteEndX: treble.getNoteEndX() },
           )
         }
 
@@ -394,43 +709,86 @@ export default function Staff({
             ? normalCap - anacruisTicks
             : normalCap
 
-        const dTreble = fillRests(showBass ? measure.treble : measure[singleClef], mCap, timeSignature)
-        const dBass   = showBass ? fillRests(measure.bass, mCap, timeSignature) : []
+        const isPickupMeasure  = anacruisTicks > 0 && globalIdx === 0
+        const tClef            = showBass ? 'treble' : singleClef
+        const useCheckVoices   = isCheckMode && showBass
 
-        const isPickupMeasure = anacruisTicks > 0 && globalIdx === 0
-        const tClef      = showBass ? 'treble' : singleClef
-        const trebleDirs = precomputeStemDirs(dTreble, timeSignature, tClef, isPickupMeasure, mCap)
-        const bassDirs   = showBass ? precomputeStemDirs(dBass, timeSignature, 'bass', isPickupMeasure, mCap) : null
+        // ── Prepare note arrays and Voice objects ─────────────────
+        let tv = null, tv2 = null, bv = null, bv2 = null
+        let dSoprano, dAlto, dTenor, dBassV, dTreble, dBass
+        const emptyOvl = () => ({ suppressAccIds: new Set(), xShiftUpperIds: new Map(), xShiftLowerIds: new Map(), accPushLeftUpper: new Set(), accPushLeftLower: new Set() })
+        let tOvl = emptyOvl()
+        let bOvl = emptyOvl()
 
-        const tv = createVoice(dTreble, timeSignature, tClef, trebleDirs)
-        const bv = showBass ? createVoice(dBass, timeSignature, 'bass', bassDirs) : null
+        if (useCheckVoices) {
+          const sopranoRaw = measure.treble.filter(n => n.stemDir !== -1)
+          const altoRaw    = measure.treble.filter(n => n.stemDir === -1)
+          const tenorRaw   = measure.bass.filter(n => n.stemDir !== -1)
+          const bassVRaw   = measure.bass.filter(n => n.stemDir === -1)
 
-        // ── Tuplets — must be created BEFORE Formatter.format() so VexFlow
-        //    adjusts tick contexts for the 3-in-2 ratio during spacing.
-        const mTuplets = []
-        const collectTuplets = (notes, vexNotes) => {
-          if (!notes || !vexNotes) return
-          const byGroup = {}
-          notes.forEach((n, i) => {
-            if (n.triplet && n.tripletGroup != null) {
-              ;(byGroup[n.tripletGroup] ??= []).push(vexNotes[i])
-            }
+          // When both voices in a clef are fully empty (no user notes, only deletion-rests
+          // or nothing at all), render a single whole rest centered in the measure —
+          // identical to the harmonize-mode empty-measure look regardless of time signature.
+          const isAllDR     = arr => arr.every(n => n.deletionRest)
+          const trebleEmpty = isAllDR(sopranoRaw) && isAllDR(altoRaw)
+          const bassEmpty   = isAllDR(tenorRaw)   && isAllDR(bassVRaw)
+          const wholeRestPair = () => ({
+            dUpper: [{ duration: 'w', isRest: true, pitch: 'b', octave: 4, id: 'cr-shared', sharedRest: true }],
+            dLower: [{ duration: 'w', isRest: true, pitch: 'b', octave: 4, id: 'cr-ghost',  ghostNote:  true }],
           })
-          // Accept groups of 2 or 3 (mixed-duration triplets have 2 VexFlow notes).
-          // Always pass num_notes:3 so VexFlow shows "3" and applies the 3:2 tick ratio.
-          Object.values(byGroup).forEach(grp => {
-            if (grp.length >= 2) mTuplets.push(new Tuplet(grp, { num_notes: 3 }))
-          })
+
+          const treblePair = trebleEmpty ? wholeRestPair() : fillCheckVoicePair(sopranoRaw, altoRaw, mCap)
+          const bassPair   = bassEmpty   ? wholeRestPair() : fillCheckVoicePair(tenorRaw,   bassVRaw, mCap)
+          dSoprano = treblePair.dUpper
+          dAlto    = treblePair.dLower
+          dTenor   = bassPair.dUpper
+          dBassV   = bassPair.dLower
+
+          tOvl = computeVoicePairOverlaps(sopranoRaw, altoRaw)
+          bOvl = computeVoicePairOverlaps(tenorRaw,   bassVRaw)
+
+          const altoRestKey     = computeLowerVoiceRestKey(sopranoRaw, 'treble')
+          const bassVRestKey    = computeLowerVoiceRestKey(tenorRaw,   'bass')
+          const sopranoRestKey  = computeUpperVoiceRestKey(altoRaw)
+          const tenorRestKey    = computeUpperVoiceRestKey(bassVRaw)
+
+          tv  = createVoice(dSoprano, timeSignature, 'treble', dSoprano.map(() =>  1), null, null, sopranoRestKey)
+          tv2 = createVoice(dAlto,    timeSignature, 'treble', dAlto.map(() => -1), tOvl.suppressAccIds, altoRestKey)
+          bv  = createVoice(dTenor,   timeSignature, 'bass',   dTenor.map(() =>  1), null, null, tenorRestKey)
+          bv2 = createVoice(dBassV,   timeSignature, 'bass',   dBassV.map(() => -1), bOvl.suppressAccIds, bassVRestKey)
+        } else {
+          dTreble = fillRests(showBass ? measure.treble : measure[singleClef], mCap, timeSignature)
+          dBass   = showBass ? fillRests(measure.bass, mCap, timeSignature) : []
+
+          const trebleDirs = precomputeStemDirs(dTreble, timeSignature, tClef, isPickupMeasure, mCap)
+          const bassDirs   = showBass ? precomputeStemDirs(dBass, timeSignature, 'bass', isPickupMeasure, mCap) : null
+
+          tv = createVoice(dTreble, timeSignature, tClef, trebleDirs)
+          bv = showBass ? createVoice(dBass, timeSignature, 'bass', bassDirs) : null
         }
-        collectTuplets(dTreble, tv?.vexNotes)
-        collectTuplets(dBass,   bv?.vexNotes)
 
-        const allVoices = [tv, bv].filter(Boolean).map(x => x.voice)
+        // ── Tuplets (harmonize mode only; not supported in check mode) ──
+        const mTuplets = []
+        if (!useCheckVoices) {
+          const collectTuplets = (notes, vexNotes) => {
+            if (!notes || !vexNotes) return
+            const byGroup = {}
+            notes.forEach((n, i) => {
+              if (n.triplet && n.tripletGroup != null) {
+                ;(byGroup[n.tripletGroup] ??= []).push(vexNotes[i])
+              }
+            })
+            Object.values(byGroup).forEach(grp => {
+              if (grp.length >= 2) mTuplets.push(new Tuplet(grp, { num_notes: 3 }))
+            })
+          }
+          collectTuplets(dTreble, tv?.vexNotes)
+          collectTuplets(dBass,   bv?.vexNotes)
+        }
+
+        // ── Format all voices together ────────────────────────────
+        const allVoices = [tv, tv2, bv, bv2].filter(Boolean).map(x => x.voice)
         if (allVoices.length) {
-          // Reserve RIGHT_PAD so the last note's head never touches the barline.
-          // getNoteEndX() doesn't account for the manually-drawn StaveConnector,
-          // and VexFlow's last TickContext.getWidth() can be only 2–3 px for dense
-          // 16th-note passages — the note head itself adds ~4–5 px more to the right.
           const RIGHT_PAD = 8
           const rawAvailW = Math.max(20, treble.getNoteEndX() - treble.getNoteStartX())
           const availW    = Math.max(10, rawAvailW - RIGHT_PAD)
@@ -450,7 +808,10 @@ export default function Staff({
 
             if (list.length === 1) {
               const ctx = map[list[0]]
-              const hasRealNote = [...dTreble, ...dBass].some(n => !n.isRest)
+              const allNotes = useCheckVoices
+                ? [...dSoprano, ...dAlto, ...dTenor, ...dBassV]
+                : [...(dTreble ?? []), ...(dBass ?? [])]
+              const hasRealNote = allNotes.some(n => !n.isRest)
               if (!hasRealNote) ctx.setX(availW / 2 - ctx.getWidth() / 2)
             } else {
               const leftPad = map[list[0]].getX()
@@ -460,60 +821,222 @@ export default function Staff({
           }
         }
 
-        const tvBeams = tv ? computeBeams(dTreble, tv.vexNotes, timeSignature, isPickupMeasure, mCap) : []
-        const bvBeams = bv ? computeBeams(dBass,   bv.vexNotes, timeSignature, isPickupMeasure, mCap) : []
+        // ── Apply x-shift for adjacent / unison note pairs ───────
+        const hasAnyShift = (ovl) =>
+          ovl.xShiftUpperIds.size > 0 || ovl.xShiftLowerIds.size > 0 ||
+          ovl.accPushLeftUpper.size > 0 || ovl.accPushLeftLower.size > 0
+        if (useCheckVoices && (hasAnyShift(tOvl) || hasAnyShift(bOvl))) {
+          const idToVex = new Map()
+          if (tv)  dSoprano.forEach((n, i) => { if (n.id) idToVex.set(n.id, tv.vexNotes[i]) })
+          if (tv2) dAlto.forEach((n, i)    => { if (n.id) idToVex.set(n.id, tv2.vexNotes[i]) })
+          if (bv)  dTenor.forEach((n, i)   => { if (n.id) idToVex.set(n.id, bv.vexNotes[i]) })
+          if (bv2) dBassV.forEach((n, i)   => { if (n.id) idToVex.set(n.id, bv2.vexNotes[i]) })
 
-        if (tv) {
-          const mainNotes = showBass ? measure.treble : measure[singleClef]
-          const mainClef  = showBass ? 'treble' : singleClef
-          mainNotes.forEach((n, i) => tieNotes[mainClef].push({
-            vexNote: tv.vexNotes[i], note: n,
-            measureIdx: globalIdx, noteIdxInMeasure: i, measureNotes: mainNotes,
-            rowIdx, stave: treble,
-          }))
-          tv.voice.draw(ctx, treble)
-          tvBeams.forEach(b => b.setContext(ctx).draw())
-          mainNotes.forEach((n, i) => {
-            const vn = tv.vexNotes[i]
-            const ys = vn.getYs()
-            if (!ys?.length) return
-            if (!n.isRest) {
-              notePositionsRef.current.push({
-                id: n.id, svgX: vn.getAbsoluteX(), svgY: ys[0],
-                pitch: n.pitch, octave: n.octave,
-              })
-            } else if (!n.isTripletPlaceholder) {
-              notePositionsRef.current.push({
-                id: n.id, svgX: vn.getAbsoluteX(), svgY: ys[0],
-                isRest: true,
-              })
+          const setNoteXShift = (id, shift) => { const vn = idToVex.get(id); if (vn) vn.setXShift(shift) }
+          // Adds ACC_EXTRA to the existing leftward push on the note's accidental(s).
+          // Modifier.setXShift(x) stores this.xShift = -x for LEFT-position modifiers,
+          // so getXShift() = -currentPush and the additive call is setXShift(-getXShift() + ACC_EXTRA).
+          const pushAccLeft = (id) => {
+            const vn = idToVex.get(id)
+            if (!vn) return
+            for (const mod of vn.getModifiers()) {
+              if (mod instanceof Accidental) mod.setXShift(-mod.getXShift() + ACC_EXTRA)
             }
-          })
+          }
+
+          for (const [id, shift] of tOvl.xShiftUpperIds) setNoteXShift(id, shift)
+          for (const [id, shift] of tOvl.xShiftLowerIds) setNoteXShift(id, shift)
+          for (const [id, shift] of bOvl.xShiftUpperIds) setNoteXShift(id, shift)
+          for (const [id, shift] of bOvl.xShiftLowerIds) setNoteXShift(id, shift)
+          for (const id of tOvl.accPushLeftUpper) pushAccLeft(id)
+          for (const id of tOvl.accPushLeftLower) pushAccLeft(id)
+          for (const id of bOvl.accPushLeftUpper) pushAccLeft(id)
+          for (const id of bOvl.accPushLeftLower) pushAccLeft(id)
+          // Shift tick contexts right by ACC_EXTRA for every tick that had an accidental
+          // pushed further left. This cancels the leftward overflow of the pushed accidental
+          // back to its VexFlow-assigned position and moves the other accidental + noteheads
+          // right by ACC_EXTRA, ensuring nothing overlaps the barline or time signature.
+          const shiftedTCs = new Set()
+          const addTCShift = (id) => {
+            const vn = idToVex.get(id)
+            if (!vn) return
+            const tc = vn.tickContext
+            if (tc && !shiftedTCs.has(tc)) { shiftedTCs.add(tc); tc.setX(tc.getX() + ACC_EXTRA) }
+          }
+          for (const id of tOvl.accPushLeftUpper) addTCShift(id)
+          for (const id of tOvl.accPushLeftLower) addTCShift(id)
+          for (const id of bOvl.accPushLeftUpper) addTCShift(id)
+          for (const id of bOvl.accPushLeftLower) addTCShift(id)
         }
-        if (bv) {
-          measure.bass.forEach((n, i) => tieNotes.bass.push({
-            vexNote: bv.vexNotes[i], note: n,
-            measureIdx: globalIdx, noteIdxInMeasure: i, measureNotes: measure.bass,
-            rowIdx, stave: bass,
-          }))
-          bv.voice.draw(ctx, bass)
-          bvBeams.forEach(b => b.setContext(ctx).draw())
-          measure.bass.forEach((n, i) => {
-            const vn = bv.vexNotes[i]
-            const ys = vn.getYs()
-            if (!ys?.length) return
-            if (!n.isRest) {
-              notePositionsRef.current.push({
-                id: n.id, svgX: vn.getAbsoluteX(), svgY: ys[0],
-                pitch: n.pitch, octave: n.octave,
-              })
-            } else if (!n.isTripletPlaceholder) {
-              notePositionsRef.current.push({
-                id: n.id, svgX: vn.getAbsoluteX(), svgY: ys[0],
-                isRest: true,
+
+        // ── Color selected notehead + stem ───────────────────────
+        if (selectedNoteId) {
+          const SELECTED_COLOR = '#A63A46'
+          const applyNoteStyle = (vn) => {
+            if (!vn?.setKeyStyle) return
+            vn.setKeyStyle(0, { fillStyle: SELECTED_COLOR, strokeStyle: SELECTED_COLOR })
+            if (vn.setStemStyle) vn.setStemStyle({ fillStyle: SELECTED_COLOR, strokeStyle: SELECTED_COLOR })
+            if (vn.setFlagStyle) vn.setFlagStyle({ fillStyle: SELECTED_COLOR, strokeStyle: SELECTED_COLOR })
+          }
+          const colorPairs = useCheckVoices
+            ? [[dSoprano, tv], [dAlto, tv2], [dTenor, bv], [dBassV, bv2]]
+            : [[dTreble, tv], [dBass, bv]]
+          // Map each check-mode voice array to its same-stave partner for unison head coloring
+          const unisonPartner = useCheckVoices ? new Map([
+            [dSoprano, [dAlto, tv2]], [dAlto, [dSoprano, tv]],
+            [dTenor,   [dBassV, bv2]], [dBassV, [dTenor, bv]],
+          ]) : null
+          for (const [arr, voice] of colorPairs) {
+            if (!voice || !arr) continue
+            const idx = arr.findIndex(n => n.id === selectedNoteId)
+            if (idx === -1) continue
+            applyNoteStyle(voice.vexNotes[idx])
+            // When two voices share one notehead, color the partner's vexNote too so
+            // the last-drawn voice doesn't overwrite our red color with black.
+            if (unisonPartner) {
+              const sel = arr[idx]
+              const companion = unisonPartner.get(arr)
+              if (companion && sel.positionTick != null && !sel.isRest) {
+                const [cArr, cVoice] = companion
+                if (cVoice) {
+                  const cIdx = cArr.findIndex(n =>
+                    !n.isRest && !n.ghostNote &&
+                    n.positionTick === sel.positionTick &&
+                    n.pitch === sel.pitch && n.octave === sel.octave
+                  )
+                  if (cIdx !== -1) applyNoteStyle(cVoice.vexNotes[cIdx])
+                }
+              }
+            }
+            break
+          }
+        }
+
+        // ── Beams ─────────────────────────────────────────────────
+        const tvBeams  = tv  ? computeBeams(useCheckVoices ? dSoprano : dTreble, tv.vexNotes,  timeSignature, isPickupMeasure, mCap) : []
+        const tv2Beams = tv2 ? computeBeams(dAlto,  tv2.vexNotes, timeSignature, isPickupMeasure, mCap) : []
+        const bvBeams  = bv  ? computeBeams(useCheckVoices ? dTenor : dBass, bv.vexNotes,  timeSignature, isPickupMeasure, mCap) : []
+        const bv2Beams = bv2 ? computeBeams(dBassV, bv2.vexNotes, timeSignature, isPickupMeasure, mCap) : []
+
+        // ── Draw & record note positions ─────────────────────────
+        const recordNotePos = (note, vexNote, clef) => {
+          if (!vexNote) return
+          const ys = vexNote.getYs()
+          if (!ys?.length) return
+          if (!note.isRest) {
+            let stemTopY = null, stemBottomY = null, stemX = null
+            if (vexNote.hasStem?.()) {
+              try {
+                const ext = vexNote.getStemExtents()
+                stemTopY    = ext.topY
+                stemBottomY = ext.baseY
+                stemX       = vexNote.getStemX()
+              } catch (_) {}
+            }
+            notePositionsRef.current.push({
+              id: note.id, svgX: vexNote.getAbsoluteX(), svgY: ys[0],
+              pitch: note.pitch, octave: note.octave, clef,
+              stemTopY, stemBottomY, stemX,
+            })
+          } else if (!note.isTripletPlaceholder) {
+            notePositionsRef.current.push({
+              id: note.id, svgX: vexNote.getAbsoluteX(), svgY: ys[0],
+              isRest: true, clef,
+            })
+          }
+        }
+
+        if (useCheckVoices) {
+          // Check mode: 4 voices — draw first, then record positions (getYs needs draw)
+          const trackAndDraw = (rawNotes, dFilled, voice, beams, staveEl, clef, voiceName) => {
+            if (!voice) return
+            voice.voice.draw(ctx, staveEl)
+            beams.forEach(b => b.setContext(ctx).draw())
+
+            // Record user-note positions for selection hit-testing; collect for tie drawing
+            rawNotes.forEach(n => {
+              const idx = dFilled.findIndex(d => d.id === n.id)
+              if (idx !== -1) {
+                recordNotePos(n, voice.vexNotes[idx], clef)
+                checkTieNotes[voiceName].push({
+                  vexNote: voice.vexNotes[idx], note: n,
+                  measureIdx: globalIdx, noteIdxInMeasure: idx, measureNotes: dFilled,
+                  rowIdx, stave: staveEl,
+                })
+              }
+            })
+
+            // Record user note positions: tick → actual VexFlow X
+            rawNotes.forEach(n => {
+              if (n.positionTick !== undefined) {
+                const key = `${globalIdx}.${clef}.${n.positionTick}`
+                if (tickPositionsRef.current[key] === undefined) {
+                  const idx = dFilled.findIndex(d => d.id === n.id)
+                  if (idx !== -1) {
+                    const ax = voice.vexNotes[idx].getAbsoluteX()
+                  tickPositionsRef.current[key] = ax
+                  }
+                }
+              }
+            })
+
+            // Also record auto-rest tick positions when the voice already has user
+            // notes. Those auto-rests are laid out by the same formatter at the
+            // correct tick slots, so they give the true X for the next note.
+            // We skip empty voices (whole-rest placeholder is centered = wrong X).
+            if (rawNotes.length > 0) {
+              let cur = 0
+              dFilled.forEach((n, i) => {
+                const tick = Math.round(cur * 10000) / 10000
+                const key  = `${globalIdx}.${clef}.${tick}`
+                if (tickPositionsRef.current[key] === undefined) {
+                  tickPositionsRef.current[key] = voice.vexNotes[i].getAbsoluteX()
+                }
+                cur = Math.round((cur + noteTicks(n)) * 10000) / 10000
               })
             }
-          })
+          }
+          trackAndDraw(measure.treble.filter(n => n.stemDir !== -1), dSoprano, tv,  tvBeams,  treble, 'treble', 'soprano')
+          trackAndDraw(measure.treble.filter(n => n.stemDir === -1), dAlto,    tv2, tv2Beams, treble, 'treble', 'alto')
+          trackAndDraw(measure.bass.filter(n => n.stemDir !== -1),   dTenor,   bv,  bvBeams,  bass,   'bass',   'tenor')
+          trackAndDraw(measure.bass.filter(n => n.stemDir === -1),   dBassV,   bv2, bv2Beams, bass,   'bass',   'bass')
+        } else {
+          // Harmonize mode: single voice per stave, tie tracking active
+          if (tv) {
+            const mainNotes = showBass ? measure.treble : measure[singleClef]
+            const mainClef  = showBass ? 'treble' : singleClef
+            mainNotes.forEach((n, i) => tieNotes[mainClef].push({
+              vexNote: tv.vexNotes[i], note: n,
+              measureIdx: globalIdx, noteIdxInMeasure: i, measureNotes: mainNotes,
+              rowIdx, stave: treble,
+            }))
+            tv.voice.draw(ctx, treble)
+            tvBeams.forEach(b => b.setContext(ctx).draw())
+            mainNotes.forEach((n, i) => recordNotePos(n, tv.vexNotes[i], tClef))
+            // Record tick positions for preview snapping (only when there are user notes,
+            // otherwise the whole-rest is centered and its X is not the insertion point)
+            if (mainNotes.length > 0) {
+              let tCur = 0
+              ;(dTreble ?? []).forEach((n, i) => {
+                const tick = Math.round(tCur * 10000) / 10000
+                const key  = `${globalIdx}.${tClef}.${tick}`
+                if (tickPositionsRef.current[key] === undefined) {
+                  tickPositionsRef.current[key] = tv.vexNotes[i].getAbsoluteX()
+                }
+                tCur = Math.round((tCur + noteTicks(n)) * 10000) / 10000
+              })
+            }
+          }
+          if (bv) {
+            measure.bass.forEach((n, i) => tieNotes.bass.push({
+              vexNote: bv.vexNotes[i], note: n,
+              measureIdx: globalIdx, noteIdxInMeasure: i, measureNotes: measure.bass,
+              rowIdx, stave: bass,
+            }))
+            bv.voice.draw(ctx, bass)
+            bvBeams.forEach(b => b.setContext(ctx).draw())
+            measure.bass.forEach((n, i) => recordNotePos(n, bv.vexNotes[i], 'bass'))
+          }
         }
 
         // Draw tuplet brackets and numerals ("3")
@@ -576,25 +1099,39 @@ export default function Staff({
       }
     }
 
-    setVexRenderCount(c => c + 1)
-  }, [measures, timeSignature, keySignature, anacruisTicks, showBass, singleClef, containerW])
+    // Check mode: draw ties per voice so soprano→soprano and alto→alto are handled
+    // separately, and a tie never crosses to a different voice.
+    // Upper voices (soprano, tenor) curve above (direction=1); lower voices curve below (-1).
+    for (const [voiceName, voiceItems] of Object.entries(checkTieNotes)) {
+      const tieDir = (voiceName === 'soprano' || voiceName === 'tenor') ? -1 : 1
+      for (let i = 0; i < voiceItems.length - 1; i++) {
+        const a = voiceItems[i]
+        const b = voiceItems[i + 1]
+        if (!a.note.tieAfter || a.note.isRest || b.note.isRest) continue
+        const semA = getEffectiveSemitones(
+          a.note, a.measureNotes.slice(0, a.noteIdxInMeasure), keyAcc)
+        const semB = getEffectiveSemitones(
+          b.note, b.measureNotes.slice(0, b.noteIdxInMeasure), keyAcc)
+        if (semA !== semB) continue
+        if (a.rowIdx === b.rowIdx) {
+          new StaveTie({
+            firstNote: a.vexNote, lastNote: b.vexNote,
+            firstIndexes: [0], lastIndexes: [0],
+          }).setDirection(tieDir).setContext(ctx).draw()
+        } else {
+          new StaveTie({
+            firstNote: a.vexNote, lastNote: null,
+            firstIndexes: [0], lastIndexes: [0],
+          }).setDirection(tieDir).setContext(ctx).draw()
+          new StaveTie({
+            firstNote: null, lastNote: b.vexNote,
+            firstIndexes: [0], lastIndexes: [0],
+          }).setDirection(tieDir).setContext(ctx).draw()
+        }
+      }
+    }
 
-  // ── Update highlight position after render or selection change ──
-  useEffect(() => {
-    if (!selectedNoteId) { setHighlightCoords(null); return }
-    const pos = notePositionsRef.current.find(p => p.id === selectedNoteId)
-    if (!pos) { setHighlightCoords(null); return }
-    const svgEl  = canvasRef.current?.querySelector('svg')
-    const wrapEl = wrapperRef.current
-    if (!svgEl || !wrapEl) { setHighlightCoords(null); return }
-    const svgRect  = svgEl.getBoundingClientRect()
-    const wrapRect = wrapEl.getBoundingClientRect()
-    const scale    = svgRect.width / canvasWRef.current
-    setHighlightCoords({
-      x: svgRect.left - wrapRect.left + pos.svgX * scale,
-      y: svgRect.top  - wrapRect.top  + pos.svgY * scale,
-    })
-  }, [selectedNoteId, vexRenderCount])
+  }, [measures, timeSignature, keySignature, anacruisTicks, showBass, singleClef, containerW, selectedNoteId])
 
   // ── Global mouse handlers for note drag (works outside wrapper) ─
   useEffect(() => {
@@ -611,6 +1148,8 @@ export default function Staff({
       const totalIdx  = nd.origPitchIdx + nd.origOctave * 7 + steps
       const newOctave = Math.floor(totalIdx / 7)
       if (newOctave < 1 || newOctave > 8) return
+      const range = NOTE_RANGE[nd.clef] ?? NOTE_RANGE.treble
+      if (totalIdx < range.min || totalIdx > range.max) return
       const newPitchIdx = ((totalIdx % 7) + 7) % 7
       if (!noteDragStartedRef.current) {
         noteDragStartedRef.current = true
@@ -658,7 +1197,7 @@ export default function Staff({
       const dist = Math.abs(svgY - (s.staveY + 60))
       if (dist < minDist) { minDist = dist; nearest = s }
     }
-    if (!nearest || minDist > 75) return null
+    if (!nearest || minDist > (isCheckMode ? 120 : 100)) return null
 
     const targetMeasure = measures[nearest.measureIdx]
     if (!targetMeasure) return null
@@ -672,6 +1211,10 @@ export default function Staff({
         : normalCap
     const base = NOTE_TICKS[drag.duration] ?? 2
 
+    let targetTick   = null
+    let previewVoice = null, previewStemDir = null
+    let snappedLocalX = null
+
     if (isTriplet && pendingTriplet) {
       // Mid-group: must target the exact same measure+clef as the pending group
       if (nearest.measureIdx !== pendingTriplet.measureIdx || nearest.clef !== pendingTriplet.clef) return null
@@ -684,25 +1227,245 @@ export default function Staff({
     } else if (isTriplet) {
       // Starting a new group: the full group (2×base) must fit
       if (used + base * 2 > cap) return null
-    } else {
-      if (used + base * (drag.dotted ? 1.5 : 1) > cap) return null
+    } else if (!isCheckMode) {
+      const effectiveDotted  = drag.duration !== '16' && drag.dotted
+      const noteActualTicks  = base * (effectiveDotted ? 1.5 : 1)
+
+      // Find the first measure (from hovered onward) that has room for this note
+      let harmMeasureIdx = nearest.measureIdx
+      while (harmMeasureIdx < measures.length) {
+        const hmIdx = harmMeasureIdx
+        const hCap  = anacruisTicks > 0 && hmIdx === 0
+          ? anacruisTicks
+          : anacruisTicks > 0 && hmIdx === measures.length - 1 && measures.length > 1
+            ? normalCap - anacruisTicks
+            : normalCap
+        const hUsed = usedTicks(measures[hmIdx]?.[nearest.clef] ?? [])
+        if (Math.round((hUsed + noteActualTicks) * 10000) / 10000 <= hCap) break
+        harmMeasureIdx++
+      }
+      if (harmMeasureIdx >= measures.length) return null
+
+      const hStave = harmMeasureIdx === nearest.measureIdx
+        ? nearest
+        : stavesRef.current.find(s => s.measureIdx === harmMeasureIdx && s.clef === nearest.clef)
+      if (!hStave) return null
+
+      const hCap = anacruisTicks > 0 && harmMeasureIdx === 0
+        ? anacruisTicks
+        : anacruisTicks > 0 && harmMeasureIdx === measures.length - 1 && measures.length > 1
+          ? normalCap - anacruisTicks
+          : normalCap
+      const hTargetTick = Math.round(usedTicks(measures[harmMeasureIdx]?.[nearest.clef] ?? []) * 10000) / 10000
+      const harmNoteAreaStart = hStave.noteStartX
+      const harmNoteAreaEnd   = hStave.noteEndX
+
+      const harmTickKey = `${harmMeasureIdx}.${nearest.clef}.${hTargetTick}`
+      let harmSvgX = tickPositionsRef.current[harmTickKey]
+      if (harmSvgX === undefined) {
+        if (hTargetTick === 0) {
+          harmSvgX = computeFirstNoteSvgX(
+            harmNoteAreaStart, harmNoteAreaEnd,
+            drag.duration, drag.dotted, timeSignature, hCap, nearest.clef,
+          ) ?? harmNoteAreaStart
+        } else {
+          harmSvgX = harmNoteAreaStart + (hTargetTick / hCap) * Math.max(1, harmNoteAreaEnd - harmNoteAreaStart)
+        }
+      }
+
+      snappedLocalX = svgRect.left + harmSvgX * scale - wrapRect.left
+      if (harmMeasureIdx !== nearest.measureIdx) {
+        nearest = { ...nearest, measureIdx: harmMeasureIdx }
+      }
     }
 
+    // ── Pitch from Y ─────────────────────────────────────────────
     const bottomY    = nearest.staveY + BOTTOM_LINE_OFFSET
     const intPos     = Math.round((bottomY - svgY) / HALF_STEP_PX)
-    const clampedPos = Math.max(-4, Math.min(12, intPos))
+    const minPos     = NOTE_RANGE[nearest.clef].min - BASE_TOTAL[nearest.clef]
+    const maxPos     = NOTE_RANGE[nearest.clef].max - BASE_TOTAL[nearest.clef]
+    const clampedPos = Math.max(minPos, Math.min(maxPos, intPos))
+    let { pitch, octave } = intPosToNote(clampedPos, nearest.clef)
+    let headSvgY    = bottomY - clampedPos * HALF_STEP_PX
+    let headScreenY = svgRect.top + headSvgY * scale
 
-    const { pitch, octave } = intPosToNote(clampedPos, nearest.clef)
+    // ── Check mode: sequential-voice target tick + voice prediction ─
+    if (isCheckMode) {
+      const noteDurTicks    = NOTE_TICKS[drag.duration] ?? 4
+      const effectiveDotted = drag.duration !== '16' && drag.dotted
+      const noteActualTicks = effectiveDotted ? noteDurTicks * 1.5 : noteDurTicks
+      const noteAreaStart   = nearest.noteStartX ?? nearest.staveX
+      const noteAreaEnd     = nearest.noteEndX   ?? (nearest.staveX + nearest.staveW)
 
-    const headSvgY    = bottomY - clampedPos * HALF_STEP_PX
-    const headScreenY = svgRect.top + headSvgY * scale
+      const clefNotes       = measures[nearest.measureIdx]?.[nearest.clef] ?? []
+      const upperVoiceNotes = clefNotes.filter(n => n.stemDir !== -1)
+      const lowerVoiceNotes = clefNotes.filter(n => n.stemDir === -1)
+      const upperV = nearest.clef === 'treble' ? 'soprano' : 'tenor'
+      const lowerV = nearest.clef === 'treble' ? 'alto'    : 'bass'
+
+      // Returns the first tick position where the voice has a gap (i.e. where
+      // the next note should go).  Scanning from tick=0 is essential: after a
+      // higher-pitched note displaces a lower one to the opposite voice, the
+      // displaced notes at ticks 4/8/12 remain in this voice and the old
+      // "last-note end" formula would wrongly report tick=16, skipping the
+      // real gap at tick=2 (right after the newly placed eighth).
+      const nextTick = voiceNotes => {
+        // Deletion-rests are overwritable placeholders — treat their span as empty.
+        const effective = voiceNotes.filter(n => !n.deletionRest)
+        if (effective.length === 0) return 0
+        const sorted = [...effective].sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+        let cursor = 0
+        for (const note of sorted) {
+          const tick = Math.round((note.positionTick ?? 0) * 10000) / 10000
+          if (tick > cursor + 0.0001) return cursor   // gap found
+          cursor = Math.round((tick + noteTicks(note)) * 10000) / 10000
+        }
+        return cursor   // no gap — return end of last note
+      }
+      const upperNext = nextTick(upperVoiceNotes)
+      const lowerNext = nextTick(lowerVoiceNotes)
+
+      const upperFull = Math.round((upperNext + noteActualTicks) * 10000) / 10000 > cap
+      const lowerFull = Math.round((lowerNext + noteActualTicks) * 10000) / 10000 > cap
+      if (upperFull && lowerFull) return null
+
+      const dtFn  = (p, o) => o * 7 + DIATONIC.indexOf(p)
+      const newDT = drag.isRest ? -Infinity : dtFn(pitch, octave)
+
+      // SVG X for any tick in this measure/clef (formatter output or linear fallback)
+      const getTickX = tick => {
+        const key = `${nearest.measureIdx}.${nearest.clef}.${tick}`
+        const x   = tickPositionsRef.current[key]
+        if (x !== undefined) return x
+        if (tick === 0) {
+          return computeFirstNoteSvgX(
+            noteAreaStart, noteAreaEnd, drag.duration, drag.dotted, timeSignature, cap, nearest.clef,
+          ) ?? noteAreaStart
+        }
+        return noteAreaStart + (tick / cap) * Math.max(1, noteAreaEnd - noteAreaStart)
+      }
+
+      // Voice assignment for a new note at `tick` given existing notes there.
+      // Returns null when the slot is empty (caller supplies the default).
+      const resolveVoice = tick => {
+        const atTick = clefNotes.filter(n => n.positionTick === tick && !n.isRest)
+        if (atTick.length === 0) return null
+        if (atTick.length === 1) {
+          const existDT = dtFn(atTick[0].pitch, atTick[0].octave)
+          return newDT > existDT
+            ? { voice: upperV, stemDir: 1 }
+            : { voice: lowerV, stemDir: -1 }
+        }
+        const sorted = [...atTick].sort((a, b) => dtFn(b.pitch, b.octave) - dtFn(a.pitch, a.octave))
+        const hiDT = dtFn(sorted[0].pitch, sorted[0].octave)
+        const loDT = dtFn(sorted[1].pitch, sorted[1].octave)
+        if      (newDT >= hiDT)                 return { voice: upperV, stemDir: 1 }
+        else if (newDT <= loDT)                 return { voice: lowerV, stemDir: -1 }
+        else if (hiDT - newDT <= newDT - loDT) return { voice: upperV, stemDir: 1 }
+        else                                    return { voice: lowerV, stemDir: -1 }
+      }
+
+      if (upperNext !== lowerNext && !upperFull && !lowerFull) {
+        // ── Asynchronous voices ──────────────────────────────────────
+        // Fill the behind voice for any cursor position left of the ahead
+        // voice's tick X.  This lets the user fill the behind voice
+        // sequentially without fighting a narrow zone boundary — the behind
+        // voice keeps its independent timeline regardless of the other voice's
+        // note positions.  Only when the cursor moves past aheadX do we
+        // switch to advancing the ahead voice to its next tick.
+        const behindTick   = Math.min(upperNext, lowerNext)
+        const aheadTick    = Math.max(upperNext, lowerNext)
+        const aheadIsUpper = upperNext > lowerNext
+
+        const aheadX = getTickX(aheadTick)
+
+        if (svgX <= aheadX) {
+          const vr = resolveVoice(behindTick)
+          if (vr) {
+            previewVoice = vr.voice; previewStemDir = vr.stemDir
+          } else {
+            previewVoice   = aheadIsUpper ? lowerV : upperV
+            previewStemDir = aheadIsUpper ? -1 : 1
+          }
+          targetTick = behindTick
+        } else {
+          previewVoice   = aheadIsUpper ? upperV : lowerV
+          previewStemDir = aheadIsUpper ? 1 : -1
+          targetTick     = aheadTick
+        }
+      } else {
+        // ── Synchronized voices (or one voice full) ──────────────────
+        const earlierTick = Math.min(
+          upperFull ? Infinity : upperNext,
+          lowerFull ? Infinity : lowerNext,
+        )
+        const vr = resolveVoice(earlierTick)
+        if (vr) {
+          previewVoice = vr.voice; previewStemDir = vr.stemDir; targetTick = earlierTick
+        } else if (!upperFull && upperNext === earlierTick) {
+          previewVoice = upperV; previewStemDir = 1; targetTick = upperNext
+        } else {
+          previewVoice = lowerV; previewStemDir = -1; targetTick = lowerNext
+        }
+      }
+
+      if (targetTick == null) return null
+
+      const tickKey    = `${nearest.measureIdx}.${nearest.clef}.${targetTick}`
+      const actualSvgX = tickPositionsRef.current[tickKey]
+      let ovalSvgX
+      if (actualSvgX !== undefined) {
+        ovalSvgX = actualSvgX
+      } else if (targetTick === 0) {
+        ovalSvgX = computeFirstNoteSvgX(
+          noteAreaStart, noteAreaEnd, drag.duration, drag.dotted, timeSignature, cap, nearest.clef,
+        ) ?? noteAreaStart
+      } else {
+        const noteAreaW = Math.max(1, noteAreaEnd - noteAreaStart)
+        ovalSvgX = noteAreaStart + (targetTick / cap) * noteAreaW
+      }
+      snappedLocalX = svgRect.left + ovalSvgX * scale - wrapRect.left
+
+      // Clamp preview pitch to avoid voice crossing with concurrent opposite-voice notes.
+      // Upper voice (soprano/tenor) must be >= max concurrent lower; lower must be <= min concurrent upper.
+      if (previewVoice != null && targetTick != null && !drag.isRest) {
+        const clefNotesAll   = measures[nearest.measureIdx]?.[nearest.clef] ?? []
+        const isUpperPreview = previewVoice === upperV
+        const oppDirClamp    = isUpperPreview ? -1 : 1
+        const dtFnC = (p, o) => o * 7 + DIATONIC.indexOf(p)
+        const concurOpp = clefNotesAll.filter(n => {
+          if (n.isRest || n.stemDir !== oppDirClamp || n.positionTick == null) return false
+          const nStart = n.positionTick
+          const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+          return nStart < targetTick + noteActualTicks && nEnd > targetTick
+        })
+        if (concurOpp.length > 0) {
+          const cDTs   = concurOpp.map(n => dtFnC(n.pitch, n.octave))
+          let newDT    = dtFnC(pitch, octave)
+          let changed  = false
+          if  (isUpperPreview && newDT < Math.max(...cDTs)) { newDT = Math.max(...cDTs); changed = true }
+          else if (!isUpperPreview && newDT > Math.min(...cDTs)) { newDT = Math.min(...cDTs); changed = true }
+          if (changed) {
+            octave   = Math.floor(newDT / 7)
+            pitch    = DIATONIC[((newDT % 7) + 7) % 7]
+            const newIntPos = newDT - BASE_TOTAL[nearest.clef]
+            headSvgY    = bottomY - newIntPos * HALF_STEP_PX
+            headScreenY = svgRect.top + headSvgY * scale
+          }
+        }
+      }
+    }
 
     return {
       measureIdx: nearest.measureIdx,
       clef: nearest.clef,
       pitch, octave,
-      localX: clientX    - wrapRect.left,
-      localY: headScreenY - wrapRect.top,
+      localX: clientX - wrapRect.left,
+      localY: headScreenY - wrapRect.top + wrapEl.scrollTop,
+      targetTick,
+      snappedLocalX,
+      previewVoice,
+      previewStemDir,
     }
   }
 
@@ -713,6 +1476,24 @@ export default function Staff({
     const svgRect = svgEl.getBoundingClientRect()
     const scale   = svgRect.width / canvasWRef.current
 
+    // First pass: stem proximity. Clicks within STEM_HIT_W px of a stem centerline
+    // and between its endpoints select that note. This is the primary disambiguation
+    // path when two voices share a notehead — click the stem to pick the right voice.
+    const STEM_HIT_W = 5
+    let stemNearest = null, stemMinDx = Infinity
+    for (const p of notePositionsRef.current) {
+      if (p.isRest || p.stemX == null) continue
+      const stemSx = svgRect.left + p.stemX * scale
+      const yLo    = svgRect.top  + Math.min(p.stemTopY, p.stemBottomY) * scale
+      const yHi    = svgRect.top  + Math.max(p.stemTopY, p.stemBottomY) * scale
+      const dx     = Math.abs(clientX - stemSx)
+      if (dx <= STEM_HIT_W && clientY >= yLo - 3 && clientY <= yHi + 3) {
+        if (dx < stemMinDx) { stemMinDx = dx; stemNearest = p }
+      }
+    }
+    if (stemNearest) return stemNearest
+
+    // Second pass: notehead proximity
     let nearest = null, minDist = Infinity
     for (const p of notePositionsRef.current) {
       const sx = svgRect.left + p.svgX * scale
@@ -725,7 +1506,14 @@ export default function Staff({
 
   // ── Mouse handlers ──────────────────────────────────────────────
   function onMouseMove(e) {
+    lastMousePosRef.current = { x: e.clientX, y: e.clientY }
     if (drag) setPreview(computePreview(e.clientX, e.clientY))
+  }
+
+  function onScroll() {
+    const last = lastMousePosRef.current
+    if (!last || !drag) return
+    setPreview(computePreview(last.x, last.y))
   }
 
   function onMouseLeave() { setPreview(null) }
@@ -738,6 +1526,7 @@ export default function Staff({
       if (!found.isRest) {
         noteDragRef.current = {
           id: found.id,
+          clef: found.clef,
           startClientY: e.clientY,
           origPitchIdx: DIATONIC.indexOf(found.pitch),
           origOctave:   found.octave,
@@ -760,6 +1549,14 @@ export default function Staff({
 
   useEffect(() => { if (!drag) setPreview(null) }, [drag])
 
+  // After a note is placed (measures prop changes), re-compute preview at the same
+  // cursor position so the indicator jumps to the next available slot immediately.
+  useEffect(() => {
+    if (drag && lastMousePosRef.current) {
+      setPreview(computePreview(lastMousePosRef.current.x, lastMousePosRef.current.y))
+    }
+  }, [measures])
+
   return (
     <div
       ref={wrapperRef}
@@ -769,24 +1566,31 @@ export default function Staff({
         isDraggingNote ? 'staff-note-dragging' : '',
       ].filter(Boolean).join(' ')}
       onMouseMove={onMouseMove}
+      onScroll={onScroll}
       onMouseLeave={onMouseLeave}
       onMouseDown={onMouseDown}
       onClick={onClick}
     >
       <div ref={canvasRef} className="staff-canvas" />
 
-      {highlightCoords && (
-        <div
-          className="note-selected-highlight"
-          style={{ left: highlightCoords.x, top: highlightCoords.y }}
-        />
-      )}
-
       {preview && (
-        <div className="note-preview" style={{ left: preview.localX, top: preview.localY }}>
+        <div
+          className={[
+            'note-preview',
+            preview.previewVoice != null ? 'check-preview' : '',
+            preview.previewStemDir === -1 ? 'voice-lower' : '',
+          ].filter(Boolean).join(' ')}
+          style={{
+            left: preview.snappedLocalX ?? preview.localX,
+            top:  preview.localY,
+          }}
+        >
           <div className="note-preview-head" />
           <div className="note-preview-label">
             {drag?.isRest ? 'Пауза' : NOTE_LABELS[preview.pitch]}
+            {preview.previewVoice && (
+              <span className="preview-voice-badge">{VOICE_BADGE[preview.previewVoice]}</span>
+            )}
           </div>
         </div>
       )}

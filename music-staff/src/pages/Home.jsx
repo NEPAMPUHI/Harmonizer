@@ -1,11 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import Staff from '../Staff'
 import NoteToolbar from '../NoteToolbar'
-import { canAdd, canAddTriplet, measureCapacity, noteTicks, NOTE_TICKS } from '../capacity'
+import { canAdd, canAddTriplet, measureCapacity, noteTicks, usedTicks, NOTE_TICKS } from '../capacity'
 import { DEFAULT_TONALITY } from '../tonalities'
 import { getKeyAccidentals, getEffectiveSemitones } from '../pitchUtils'
 import { downloadScoreJson, scoreToJson } from '../scoreToJson'
 import { harmonizeScore } from '../api'
+
+// Allowed note range per clef (diatonic totals = octave×7 + pitch_index)
+const NOTE_RANGE = {
+  treble: { min: 25, max: 42 },   // G3–C6
+  bass:   { min: 14, max: 31 },   // C2–F4
+}
 
 const DURATIONS = [
   { id: 'w', label: 'Ціла' },
@@ -28,7 +34,6 @@ const FORBIDDEN_RULES = [
   { id: 'chromatic_transfer',   label: 'передача хроматичного півтона в інший голос' },
   { id: 'bass_leap_sequence',   label: '2 послідовні ходи по квартам/квінтам в басу' },
   { id: 'large_interval_sa_at', label: 'більше октави між S і A, A і T' },
-  { id: 'double_third',         label: 'подвоєння терцового тону' },
 ]
 
 const ALLOWED_CHORDS = [
@@ -36,41 +41,310 @@ const ALLOWED_CHORDS = [
   'D7', 'D65', 'D43', 'D2',
   'II53', 'II6', 'VI53', 'II7', 'II65', 'II43', 'II2',
   'VII7', 'VII65', 'VII43', 'VII2',
-  'D9', 'II9', 'VII6', 'III53', 'D+6',
+  'D9', 'VII6', 'III53',
 ].map(id => ({ id, label: id }))
+
+// Durations where two voices at the same pitch share a single note head
+const SHARED_HEAD_DURS = new Set(['q', '8', '16'])
+
+// In check mode, if `noteId` is part of a unison pair (same pitch, same tick,
+// compatible durations), returns the partner note's id; otherwise null.
+function findUnisonPartner(measures, noteId) {
+  for (const m of measures) {
+    for (const clef of ['treble', 'bass']) {
+      const noteIdx = m[clef].findIndex(n => n.id === noteId)
+      if (noteIdx === -1) continue
+      const note = m[clef][noteIdx]
+      if (note.isRest || note.positionTick == null || note.stemDir == null) return null
+      const partner = m[clef].find(n =>
+        n.id !== noteId &&
+        !n.isRest &&
+        n.positionTick === note.positionTick &&
+        n.pitch === note.pitch &&
+        n.octave === note.octave &&
+        n.stemDir !== note.stemDir &&
+        (n.duration === note.duration ||
+          // Both in {q,8,16} AND dot presence is the same → shared head
+          (SHARED_HEAD_DURS.has(n.duration) && SHARED_HEAD_DURS.has(note.duration) &&
+           !!n.dotted === !!note.dotted))
+      )
+      return partner?.id ?? null
+    }
+  }
+  return null
+}
 
 const MAX_MEASURES   = 64
 const MAX_UNDO       = 50
 const EMPTY_MEASURE  = () => ({ treble: [], bass: [] })
 const PICKUP_MEASURE = () => ({ treble: [], bass: [], isPickup: true })
 
-function findNextAfterDelete(ms, deletedId) {
-  let foundClef = null
-  for (const m of ms) {
-    for (const clef of ['treble', 'bass']) {
-      if (m[clef].some(n => n.id === deletedId)) { foundClef = clef; break }
+// Split a flat note array into measures of given tick capacity.
+// Triplet groups are kept atomic (never split across a measure boundary).
+function splitIntoMeasures(notes, cap) {
+  // Build atomic units: single notes or complete triplet groups
+  const units = []
+  let i = 0
+  while (i < notes.length) {
+    const note = notes[i]
+    if (note.triplet && note.tripletGroup != null) {
+      const gid = note.tripletGroup
+      const group = []
+      while (i < notes.length && notes[i].tripletGroup === gid) {
+        group.push(notes[i])
+        i++
+      }
+      units.push({ notes: group, ticks: group.reduce((s, n) => s + noteTicks(n), 0) })
+    } else {
+      units.push({ notes: [note], ticks: noteTicks(note) })
+      i++
     }
-    if (foundClef) break
   }
-  if (!foundClef) return null
 
-  const flat = ms.flatMap(m => m[foundClef].filter(n => !n.isTripletPlaceholder))
-  const curIdx = flat.findIndex(n => n.id === deletedId)
-  if (curIdx === -1) return null
+  const result = [[]]
+  let used = 0
 
-  const target = flat[curIdx]
-  const deletedIds = new Set()
-  if (target.triplet && target.tripletGroup != null) {
-    ms.forEach(m => m[foundClef].forEach(n => {
-      if (n.tripletGroup === target.tripletGroup) deletedIds.add(n.id)
-    }))
+  for (const unit of units) {
+    const projected = Math.round((used + unit.ticks) * 10000) / 10000
+    // Start a new measure only if there are already notes in the current one
+    if (used > 0 && projected > cap) {
+      result.push([])
+      used = 0
+    }
+    result[result.length - 1].push(...unit.notes)
+    used = Math.round((used + unit.ticks) * 10000) / 10000
+  }
+
+  return result
+}
+
+// Rest sizes used for decomposing merged tick spans into standard note values (largest first)
+const MERGE_REST_SIZES = [
+  { duration: 'w',  dotted: false, ticks: 16 },
+  { duration: 'h',  dotted: true,  ticks: 12 },
+  { duration: 'h',  dotted: false, ticks:  8 },
+  { duration: 'q',  dotted: true,  ticks:  6 },
+  { duration: 'q',  dotted: false, ticks:  4 },
+  { duration: '8',  dotted: true,  ticks:  3 },
+  { duration: '8',  dotted: false, ticks:  2 },
+  { duration: '16', dotted: false, ticks:  1 },
+]
+
+// Decomposes [startTick, startTick+totalTicks) into standard deletion-rest objects.
+// All resulting rests are tagged deletionRest:true so they act as overwritable placeholders.
+function decomposeRestTicks(startTick, totalTicks, voice, stemDir) {
+  const result = []
+  let rem    = Math.round(totalTicks * 10000) / 10000
+  let cursor = startTick
+  let id     = Date.now()
+  for (const { duration, dotted, ticks } of MERGE_REST_SIZES) {
+    while (rem >= ticks - 0.0001) {
+      result.push({
+        pitch: 'b', octave: 4, duration, dotted: dotted || undefined,
+        isRest: true, deletionRest: true,
+        voice, positionTick: Math.round(cursor * 10000) / 10000,
+        stemDir, id: id++,
+      })
+      cursor = Math.round((cursor + ticks) * 10000) / 10000
+      rem    = Math.round((rem    - ticks) * 10000) / 10000
+    }
+  }
+  return result
+}
+
+// Merges contiguous same-voice rests in a check-mode clef note array.
+// Each voice (stemDir) is processed independently so rests from different voices
+// never merge into each other, and a note between two rests blocks the merge.
+// All merged rests are tagged deletionRest:true so they remain overwritable.
+// Returns a new array sorted by positionTick.
+function mergeAdjacentVoiceRests(notes) {
+  function processVoice(voiceNotes) {
+    const sorted = [...voiceNotes].sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+    const result = []
+    let i = 0
+    while (i < sorted.length) {
+      const n = sorted[i]
+      if (!n.isRest) { result.push(n); i++; continue }
+
+      const runVoice   = n.voice
+      const runStemDir = n.stemDir
+      const runStart   = n.positionTick ?? 0
+      let runTicks = 0
+      let j = i
+      while (j < sorted.length && sorted[j].isRest) {
+        const m        = sorted[j]
+        const expected = Math.round((runStart + runTicks) * 10000) / 10000
+        const mStart   = Math.round((m.positionTick ?? 0) * 10000) / 10000
+        if (Math.abs(mStart - expected) > 0.0001) break
+        runTicks = Math.round((runTicks + noteTicks(m)) * 10000) / 10000
+        j++
+      }
+
+      result.push(...decomposeRestTicks(runStart, runTicks, runVoice, runStemDir))
+      i = j
+    }
+    return result
+  }
+
+  const upper = notes.filter(n => n.stemDir !== -1)
+  const lower = notes.filter(n => n.stemDir === -1)
+  return [...processVoice(upper), ...processVoice(lower)]
+    .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+}
+
+// Returns { newMeasures, nextSelectedId } after deleting the note from measures.
+// Harmonize mode: removes note (or whole triplet group), then:
+//   - selects the note that was immediately after (shifts left) if any remain in the measure
+//   - otherwise selects the last note of the nearest previous non-empty measure
+// Check mode: replaces deleted note with an explicit rest (same duration/tick/voice/stemDir),
+//   does NOT shift subsequent notes, then selects:
+//   1) next note in same voice (cross-measure, forward)
+//   2) previous note in same voice (cross-measure, backward)
+//   3) nearest note in the other voice of the same clef (by positionTick distance)
+function computeDeleteResult(ms, deletedId, currentMode) {
+  let foundMIdx = -1, foundClef = null, foundNoteIdx = -1
+  outer: for (let mi = 0; mi < ms.length; mi++) {
+    for (const clef of ['treble', 'bass']) {
+      const idx = ms[mi][clef].findIndex(n => n.id === deletedId)
+      if (idx !== -1) { foundMIdx = mi; foundClef = clef; foundNoteIdx = idx; break outer }
+    }
+  }
+  if (foundMIdx === -1) return null
+
+  const deletedNote = ms[foundMIdx][foundClef][foundNoteIdx]
+
+  if (currentMode !== 'check') {
+    // ── Harmonize mode ────────────────────────────────────────────
+    const deleteIds = new Set()
+    if (deletedNote.triplet && deletedNote.tripletGroup != null) {
+      ms[foundMIdx][foundClef].forEach(n => {
+        if (n.tripletGroup === deletedNote.tripletGroup) deleteIds.add(n.id)
+      })
+    } else {
+      deleteIds.add(deletedId)
+    }
+
+    const realNotes = ms[foundMIdx][foundClef].filter(n => !n.isTripletPlaceholder)
+    const deletedRealIndices = realNotes
+      .map((n, i) => deleteIds.has(n.id) ? i : -1)
+      .filter(i => i !== -1)
+
+    if (deletedRealIndices.length === 0) {
+      return {
+        newMeasures: ms.map((m, mi) =>
+          mi !== foundMIdx ? m : { ...m, [foundClef]: m[foundClef].filter(n => !deleteIds.has(n.id)) }
+        ),
+        nextSelectedId: null,
+      }
+    }
+
+    const firstIdx = Math.min(...deletedRealIndices)
+    const lastIdx  = Math.max(...deletedRealIndices)
+    const hasNotesAfter = realNotes.some((n, i) => i > lastIdx && !deleteIds.has(n.id))
+
+    const remaining = realNotes.filter(n => !deleteIds.has(n.id))
+    let nextId = null
+    if (hasNotesAfter) {
+      nextId = remaining[firstIdx]?.id ?? null
+    } else {
+      // No notes after — go to the nearest previous note
+      if (firstIdx > 0) {
+        nextId = remaining[firstIdx - 1]?.id ?? null
+      } else {
+        for (let mi = foundMIdx - 1; mi >= 0; mi--) {
+          const prev = ms[mi][foundClef].filter(n => !n.isTripletPlaceholder)
+          if (prev.length > 0) { nextId = prev[prev.length - 1].id; break }
+        }
+      }
+    }
+
+    const newMeasures = ms.map((m, mi) =>
+      mi !== foundMIdx ? m : { ...m, [foundClef]: m[foundClef].filter(n => !deleteIds.has(n.id)) }
+    )
+    return { newMeasures, nextSelectedId: nextId }
+
   } else {
-    deletedIds.add(deletedId)
-  }
+    // ── Check mode ────────────────────────────────────────────────
+    const deletedTick    = deletedNote.positionTick ?? 0
+    const deletedStemDir = deletedNote.stemDir
 
-  const remaining = flat.filter(n => !deletedIds.has(n.id))
-  const newIdx = Math.min(curIdx, remaining.length - 1)
-  return newIdx >= 0 ? remaining[newIdx].id : null
+    // Replace the deleted note with an explicit rest of the same duration/position/voice.
+    // Subsequent notes are NOT shifted — the voice timeline is preserved.
+    // deletionRest:true marks it as an overwritable placeholder (not a user-placed rest).
+    const restNote = {
+      pitch: 'b', octave: 4,
+      duration: deletedNote.duration,
+      dotted: deletedNote.dotted || undefined,
+      isRest: true, deletionRest: true,
+      voice: deletedNote.voice,
+      positionTick: deletedTick,
+      stemDir: deletedStemDir,
+      id: Date.now(),
+    }
+
+    const newMeasures = ms.map((m, mi) => {
+      if (mi !== foundMIdx) return m
+      return { ...m, [foundClef]: m[foundClef].map(n => n.id === deletedId ? restNote : n) }
+    })
+
+    const isSameVoiceNote = n =>
+      n.id !== deletedId && !n.isRest && n.stemDir === deletedStemDir
+
+    // 1) Next note in same voice, searching forward across all measures
+    let nextId = null
+    const nextInCurrent = ms[foundMIdx][foundClef]
+      .filter(n => isSameVoiceNote(n) && n.positionTick != null && n.positionTick > deletedTick + 0.0001)
+      .sort((a, b) => a.positionTick - b.positionTick)
+    if (nextInCurrent.length > 0) {
+      nextId = nextInCurrent[0].id
+    } else {
+      for (let mi = foundMIdx + 1; mi < ms.length; mi++) {
+        const ahead = ms[mi][foundClef]
+          .filter(n => !n.isRest && n.stemDir === deletedStemDir)
+          .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+        if (ahead.length > 0) { nextId = ahead[0].id; break }
+      }
+    }
+
+    // 2) Previous note in same voice, searching backward across all measures
+    if (!nextId) {
+      const prevInCurrent = ms[foundMIdx][foundClef]
+        .filter(n => isSameVoiceNote(n) && n.positionTick != null && n.positionTick < deletedTick - 0.0001)
+        .sort((a, b) => b.positionTick - a.positionTick)
+      if (prevInCurrent.length > 0) {
+        nextId = prevInCurrent[0].id
+      } else {
+        for (let mi = foundMIdx - 1; mi >= 0; mi--) {
+          const behind = ms[mi][foundClef]
+            .filter(n => !n.isRest && n.stemDir === deletedStemDir)
+            .sort((a, b) => (b.positionTick ?? 0) - (a.positionTick ?? 0))
+          if (behind.length > 0) { nextId = behind[0].id; break }
+        }
+      }
+    }
+
+    // 3) Nearest note in the other voice of the same clef (across all measures)
+    if (!nextId) {
+      const otherStemDir = deletedStemDir === 1 ? -1 : 1
+      let closestId = null, closestDist = Infinity
+      for (const m of ms) {
+        for (const n of m[foundClef]) {
+          if (n.isRest || n.stemDir !== otherStemDir) continue
+          const dist = Math.abs((n.positionTick ?? 0) - deletedTick)
+          if (dist < closestDist) { closestDist = dist; closestId = n.id }
+        }
+      }
+      nextId = closestId
+    }
+
+    // Merge adjacent same-voice rests in the affected measure/clef
+    const mergedMeasures = newMeasures.map((m, mi) => {
+      if (mi !== foundMIdx) return m
+      return { ...m, [foundClef]: mergeAdjacentVoiceRests(m[foundClef]) }
+    })
+
+    return { newMeasures: mergedMeasures, nextSelectedId: nextId }
+  }
 }
 
 export default function Home() {
@@ -84,7 +358,7 @@ export default function Home() {
   const [accidental,     setAccidental]     = useState(null)
   const [isDotted,       setIsDotted]       = useState(false)
   const [isTie,          setIsTie]          = useState(false)
-  const [anacrusis,      setAnacrusis]      = useState({ enabled: false, q: 0, e: 0, s: 0 })
+  const [anacrusis,      setAnacrusis]      = useState({ enabled: false, e: 0, s: 0 })
   const [selectedNoteId, setSelectedNoteId] = useState(null)
   const [isEditMode,     setIsEditMode]     = useState(false)
   const [mode,           setMode]           = useState('harmonize')
@@ -94,11 +368,33 @@ export default function Home() {
   const measuresRef = useRef(measures)
   useEffect(() => { measuresRef.current = measures }, [measures])
 
+  const anacrusisRef = useRef(anacrusis)
+  useEffect(() => { anacrusisRef.current = anacrusis }, [anacrusis])
+
+  const modeRef = useRef(mode)
+  useEffect(() => { modeRef.current = mode }, [mode])
+
+  const timeSignatureRef = useRef(timeSignature)
+  useEffect(() => { timeSignatureRef.current = timeSignature }, [timeSignature])
+
+  // Stores the full 4-voice check-mode state so it can be restored after a round-trip through harmonize mode
+  const savedCheckMeasuresRef = useRef(null)
+
   // ── Undo stack ────────────────────────────────────────────────────
   const [undoStack, setUndoStack] = useState([])
 
   function pushUndo() {
-    setUndoStack(prev => [...prev.slice(-(MAX_UNDO - 1)), measuresRef.current])
+    setUndoStack(prev => [...prev.slice(-(MAX_UNDO - 1)), {
+      measures: measuresRef.current,
+      anacrusis: anacrusisRef.current,
+      timeSignature: timeSignatureRef.current,
+      savedCheckMeasures: savedCheckMeasuresRef.current,
+    }])
+  }
+
+  function handleChangeAnacrusis(newAnacrusis) {
+    pushUndo()
+    setAnacrusis(newAnacrusis)
   }
 
   // ── Triplet mode ─────────────────────────────────────────────────
@@ -118,6 +414,9 @@ export default function Home() {
   // ── Check mode ───────────────────────────────────────────────────
   const [isChecking, setIsChecking] = useState(false)
 
+  // ── Scale modes (harmonize mode) ────────────────────────────────
+  const [selectedModes, setSelectedModes] = useState(['natural', 'harmonic', 'melodic'])
+
   const [selectedForbiddenRules, setSelectedForbiddenRules] = useState(
     () => FORBIDDEN_RULES.map(r => r.id)
   )
@@ -127,10 +426,21 @@ export default function Home() {
 
   // ── Anacrusis computed values ────────────────────────────────────
   const normalCap        = measureCapacity(timeSignature)
-  const rawAnacruisTicks = anacrusis.q * 4 + anacrusis.e * 2 + anacrusis.s * 1
+  const rawAnacruisTicks = anacrusis.e * 2 + anacrusis.s * 1
   const anacruisTicks    = anacrusis.enabled && rawAnacruisTicks > 0 && rawAnacruisTicks < normalCap
     ? rawAnacruisTicks : 0
   const hasAnacrusis = anacruisTicks > 0
+
+  // Maximum allowed anacrusis ticks.
+  // When rawAnacruisTicks is already > 0 the pickup exists and the last measure has a
+  // reduced capacity — increasing further must leave room for any notes already there.
+  // When rawAnacruisTicks is 0 the user is creating the anacrusis from scratch: allow
+  // any value < normalCap; the useEffect will add a new empty measure if needed (case 4.2).
+  const _lastM            = measures[measures.length - 1]
+  const _lastMaxUsed      = Math.max(usedTicks(_lastM?.treble ?? []), usedTicks(_lastM?.bass ?? []))
+  const maxAnacruisTicks  = rawAnacruisTicks === 0
+    ? normalCap - 1
+    : normalCap - Math.max(1, _lastMaxUsed)
 
   function getMeasureCap(measureIdx, totalMeasures) {
     if (!hasAnacrusis) return normalCap
@@ -143,11 +453,24 @@ export default function Home() {
   useEffect(() => {
     setMeasures(prev => {
       const firstIsPickup = prev[0]?.isPickup === true
-      if (hasAnacrusis && !firstIsPickup) return [PICKUP_MEASURE(), ...prev]
+
+      if (hasAnacrusis && !firstIsPickup) {
+        // Case 4.1: last measure has room for the complement → just prepend the pickup.
+        // Case 4.2: last measure is too full → append a new empty measure first so
+        //           notes are never lost, then prepend the pickup.
+        const last = prev[prev.length - 1]
+        const reducedCap = normalCap - anacruisTicks
+        const lastFits = usedTicks(last.treble) <= reducedCap && usedTicks(last.bass) <= reducedCap
+        return lastFits
+          ? [PICKUP_MEASURE(), ...prev]
+          : [PICKUP_MEASURE(), ...prev, EMPTY_MEASURE()]
+      }
+
       if (!hasAnacrusis && firstIsPickup) {
         const rest = prev.slice(1)
         return rest.length > 0 ? rest : [EMPTY_MEASURE()]
       }
+
       if (hasAnacrusis && firstIsPickup) {
         const trim = (notes) => {
           let total = 0
@@ -161,6 +484,7 @@ export default function Home() {
           i === 0 ? { ...m, treble: trim(m.treble), bass: trim(m.bass) } : m
         )
       }
+
       return prev
     })
   }, [hasAnacrusis, anacruisTicks])   // eslint-disable-line react-hooks/exhaustive-deps
@@ -191,43 +515,6 @@ export default function Home() {
     if (!selectedNoteId) return
     function handleKeyDown(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
-
-      if (e.key === 'Delete' && isEditMode) {
-        e.preventDefault()
-        const ms = measuresRef.current
-        // Verify note still exists before pushing undo
-        let noteExists = false
-        for (const m of ms) {
-          for (const clef of ['treble', 'bass']) {
-            if (m[clef].some(n => n.id === selectedNoteId)) { noteExists = true; break }
-          }
-          if (noteExists) break
-        }
-        if (!noteExists) return
-        pushUndo()
-        const nextId = findNextAfterDelete(ms, selectedNoteId)
-        setMeasures(prev => {
-          for (let mIdx = 0; mIdx < prev.length; mIdx++) {
-            for (const clef of ['treble', 'bass']) {
-              const noteIdx = prev[mIdx][clef].findIndex(n => n.id === selectedNoteId)
-              if (noteIdx === -1) continue
-              const note = prev[mIdx][clef][noteIdx]
-              if (note.triplet && note.tripletGroup != null) {
-                const gid = note.tripletGroup
-                return prev.map((m, mi) =>
-                  mi !== mIdx ? m : { ...m, [clef]: m[clef].filter(n => n.tripletGroup !== gid) }
-                )
-              }
-              return prev.map((m, mi) =>
-                mi !== mIdx ? m : { ...m, [clef]: m[clef].filter((_, ni) => ni !== noteIdx) }
-              )
-            }
-          }
-          return prev
-        })
-        setSelectedNoteId(nextId)
-        return
-      }
 
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault()
@@ -278,7 +565,29 @@ export default function Home() {
             const totalIdx  = pitchIdx + note.octave * 7 + delta
             const newOctave = Math.floor(totalIdx / 7)
             if (newOctave < 1 || newOctave > 8) return prev
+            const range = NOTE_RANGE[clef] ?? NOTE_RANGE.treble
+            if (totalIdx < range.min || totalIdx > range.max) return prev
             const newPitchIdx = ((totalIdx % 7) + 7) % 7
+            // Check mode: prevent voice crossing with concurrent opposite-voice notes
+            if (modeRef.current === 'check' && note.stemDir != null && note.positionTick != null) {
+              const isUpper   = note.stemDir !== -1
+              const noteStart = note.positionTick
+              const noteEnd   = Math.round((noteStart + noteTicks(note)) * 10000) / 10000
+              const dtFn      = (p, o) => o * 7 + DIATONIC.indexOf(p)
+              const newDT     = dtFn(DIATONIC[newPitchIdx], newOctave)
+              const oppDir    = isUpper ? -1 : 1
+              const concurrent = notes.filter(n => {
+                if (n.id === selectedNoteId || n.isRest || n.stemDir !== oppDir || n.positionTick == null) return false
+                const nStart = n.positionTick
+                const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+                return nStart < noteEnd && nEnd > noteStart
+              })
+              if (concurrent.length > 0) {
+                const cDTs = concurrent.map(n => dtFn(n.pitch, n.octave))
+                if ( isUpper && newDT < Math.max(...cDTs)) return prev
+                if (!isUpper && newDT > Math.min(...cDTs)) return prev
+              }
+            }
             const newNote = { ...note, pitch: DIATONIC[newPitchIdx], octave: newOctave }
             return prev.map((m, mi) =>
               mi !== mIdx ? m : { ...m, [clef]: notes.map((n, ni) => ni === noteIdx ? newNote : n) }
@@ -291,6 +600,33 @@ export default function Home() {
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [selectedNoteId, isEditMode])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Global keyboard shortcuts: Ctrl+Z (undo) and Delete/Backspace (clear) ──
+  const globalShortcutRef = useRef(null)
+  globalShortcutRef.current = (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return
+
+    if (e.ctrlKey && e.code === 'KeyZ') {
+      e.preventDefault()
+      undo()
+      return
+    }
+
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault()
+      if (isEditMode && selectedNoteId) {
+        deleteSelectedNote()
+      } else {
+        clearAll()
+      }
+    }
+  }
+
+  useEffect(() => {
+    const handler = (e) => globalShortcutRef.current(e)
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Sync toolbar to selected note when navigating in edit mode ────
   useEffect(() => {
@@ -323,7 +659,65 @@ export default function Home() {
           if (noteIdx === -1) continue
           const note = notes[noteIdx]
           if (note.isRest) return prev
+
+          // In check mode prevent voice crossing: upper voice must stay at or above
+          // the highest concurrent lower-voice note, and lower voice must stay at or
+          // below the lowest concurrent upper-voice note.
+          if (mode === 'check' && note.stemDir != null && note.positionTick != null) {
+            const isUpper   = note.stemDir !== -1
+            const noteStart = note.positionTick
+            const noteEnd   = Math.round((noteStart + noteTicks(note)) * 10000) / 10000
+            const dt        = (p, o) => o * 7 + DIATONIC.indexOf(p)
+            const newDT     = dt(newPitch, newOctave)
+            const oppDir    = isUpper ? -1 : 1
+
+            const concurrent = notes.filter(n => {
+              if (n.id === id || n.isRest || n.stemDir !== oppDir || n.positionTick == null) return false
+              const nStart = n.positionTick
+              const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+              return nStart < noteEnd && nEnd > noteStart
+            })
+
+            if (concurrent.length > 0) {
+              const concurrentDTs = concurrent.map(n => dt(n.pitch, n.octave))
+              if (isUpper && newDT < Math.max(...concurrentDTs)) return prev
+              if (!isUpper && newDT > Math.min(...concurrentDTs)) return prev
+            }
+          }
+
           const newNote = { ...note, pitch: newPitch, octave: newOctave }
+
+          // In check mode, sync accidentals when a unison forms or breaks.
+          // Dragged note's accidental becomes the shared accidental on entry;
+          // partner's accidental is cleared to undefined on exit.
+          if (mode === 'check' && note.stemDir != null && note.positionTick != null) {
+            const partnerIdx = notes.findIndex(n =>
+              n.id !== id &&
+              !n.isRest &&
+              n.stemDir !== note.stemDir &&
+              n.positionTick === note.positionTick
+            )
+            if (partnerIdx !== -1) {
+              const partner   = notes[partnerIdx]
+              const wasUnison = note.pitch === partner.pitch && note.octave === partner.octave
+              const isUnison  = newPitch   === partner.pitch && newOctave  === partner.octave
+              if (isUnison !== wasUnison) {
+                const updatedPartner = { ...partner,
+                  accidental: isUnison ? newNote.accidental : undefined }
+                return prev.map((m, mi) =>
+                  mi !== mIdx ? m : {
+                    ...m,
+                    [clef]: notes.map((n, ni) =>
+                      ni === noteIdx    ? newNote        :
+                      ni === partnerIdx ? updatedPartner :
+                      n
+                    )
+                  }
+                )
+              }
+            }
+          }
+
           return prev.map((m, mi) =>
             mi !== mIdx ? m : { ...m, [clef]: notes.map((n, ni) => ni === noteIdx ? newNote : n) }
           )
@@ -365,35 +759,21 @@ export default function Home() {
     if (undoStack.length === 0) return
     const snapshot = undoStack[undoStack.length - 1]
     setUndoStack(prev => prev.slice(0, -1))
-    setMeasures(snapshot)
+    setMeasures(snapshot.measures)
+    setAnacrusis(snapshot.anacrusis)
+    if (snapshot.timeSignature !== undefined) setTimeSignature(snapshot.timeSignature)
+    if (snapshot.savedCheckMeasures !== undefined) savedCheckMeasuresRef.current = snapshot.savedCheckMeasures
     // selectedNoteId is validated by the existing useEffect
   }
 
   // ── Selected-note editing ────────────────────────────────────────
   function deleteSelectedNote() {
     if (!selectedNoteId) return
+    const result = computeDeleteResult(measuresRef.current, selectedNoteId, mode)
+    if (!result) return
     pushUndo()
-    const nextId = findNextAfterDelete(measures, selectedNoteId)
-    setMeasures(prev => {
-      for (let mIdx = 0; mIdx < prev.length; mIdx++) {
-        for (const clef of ['treble', 'bass']) {
-          const noteIdx = prev[mIdx][clef].findIndex(n => n.id === selectedNoteId)
-          if (noteIdx === -1) continue
-          const note = prev[mIdx][clef][noteIdx]
-          if (note.triplet && note.tripletGroup != null) {
-            const gid = note.tripletGroup
-            return prev.map((m, mi) =>
-              mi !== mIdx ? m : { ...m, [clef]: m[clef].filter(n => n.tripletGroup !== gid) }
-            )
-          }
-          return prev.map((m, mi) =>
-            mi !== mIdx ? m : { ...m, [clef]: m[clef].filter((_, ni) => ni !== noteIdx) }
-          )
-        }
-      }
-      return prev
-    })
-    setSelectedNoteId(nextId)
+    setMeasures(result.newMeasures)
+    setSelectedNoteId(result.nextSelectedId)
   }
 
   function editSelectedNoteDuration(newDuration) {
@@ -405,17 +785,62 @@ export default function Home() {
           if (noteIdx === -1) continue
           const note = prev[mIdx][clef][noteIdx]
           if (note.triplet || note.isTripletPlaceholder) return prev
-          const cap = getMeasureCap(mIdx, prev.length)
-          const newDotted  = newDuration === '16' ? false : (note.dotted ?? false)
-          const baseTicks  = NOTE_TICKS[newDuration] ?? 4
-          const newTicks   = newDotted ? baseTicks * 1.5 : baseTicks
-          const otherTicks = prev[mIdx][clef].reduce((s, n, ni) =>
-            ni !== noteIdx ? s + noteTicks(n) : s, 0)
-          if (otherTicks + newTicks > cap) return prev
-          const newNote = { ...note, duration: newDuration, dotted: newDotted || undefined }
-          return prev.map((m, mi) =>
-            mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) => ni === noteIdx ? newNote : n) }
-          )
+
+          const cap      = getMeasureCap(mIdx, prev.length)
+          const newDotted = newDuration === '16' ? false : (note.dotted ?? false)
+          const baseTicks = NOTE_TICKS[newDuration] ?? 4
+          const newTicks  = newDotted ? baseTicks * 1.5 : baseTicks
+          const oldTicks  = noteTicks(note)
+          const newNote   = { ...note, duration: newDuration, dotted: newDotted || undefined }
+
+          // ── Harmonize mode: simple linear capacity check ───────
+          if (mode !== 'check' || note.positionTick == null) {
+            const otherTicks = prev[mIdx][clef].reduce((s, n, ni) =>
+              ni !== noteIdx ? s + noteTicks(n) : s, 0)
+            if (otherTicks + newTicks > cap) return prev
+            return prev.map((m, mi) =>
+              mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) => ni === noteIdx ? newNote : n) }
+            )
+          }
+
+          // ── Check mode: position-aware validation ──────────────
+          const { positionTick, stemDir, voice } = note
+          const newEnd = Math.round((positionTick + newTicks) * 10000) / 10000
+          const oldEnd = Math.round((positionTick + oldTicks) * 10000) / 10000
+
+          // Reject if note would exceed measure boundary
+          if (newEnd > cap + 0.0001) return prev
+
+          // Reject if new span overlaps a real/explicit note or rest of the same voice
+          const hasOverlap = prev[mIdx][clef].some(n => {
+            if (n.id === note.id || n.stemDir !== stemDir || n.positionTick == null) return false
+            if (n.deletionRest) return false // auto-rests are overwritable
+            const nStart = n.positionTick
+            const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+            return nStart < newEnd - 0.0001 && nEnd > positionTick + 0.0001
+          })
+          if (hasOverlap) return prev
+
+          // Apply the note change
+          let updated = prev[mIdx][clef].map((n, ni) => ni === noteIdx ? newNote : n)
+
+          if (newTicks < oldTicks) {
+            // Note shortened: fill the freed gap [newEnd, oldEnd) with deletion-rests
+            const newRests = decomposeRestTicks(newEnd, oldTicks - newTicks, voice, stemDir)
+            updated = [...updated, ...newRests]
+              .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+          } else if (newTicks > oldTicks) {
+            // Note lengthened: remove deletion-rests consumed by [oldEnd, newEnd)
+            updated = updated.filter(n => {
+              if (!n.deletionRest || n.stemDir !== stemDir) return true
+              const rs = n.positionTick ?? 0
+              const re = Math.round((rs + noteTicks(n)) * 10000) / 10000
+              return !(rs < newEnd - 0.0001 && re > oldEnd - 0.0001)
+            })
+          }
+
+          const merged = mergeAdjacentVoiceRests(updated)
+          return prev.map((m, mi) => mi !== mIdx ? m : { ...m, [clef]: merged })
         }
       }
       return prev
@@ -426,6 +851,7 @@ export default function Home() {
 
   function editSelectedNoteAccidental(accId) {
     pushUndo()
+    const partnerId = mode === 'check' ? findUnisonPartner(measuresRef.current, selectedNoteId) : null
     setMeasures(prev => {
       for (let mIdx = 0; mIdx < prev.length; mIdx++) {
         for (const clef of ['treble', 'bass']) {
@@ -434,11 +860,26 @@ export default function Home() {
           const note = prev[mIdx][clef][noteIdx]
           if (note.isRest || note.isTripletPlaceholder) return prev
           const newAcc = note.accidental === accId ? undefined : accId
-          return prev.map((m, mi) =>
+          let updated = prev.map((m, mi) =>
             mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) =>
               ni !== noteIdx ? n : { ...note, accidental: newAcc }
             )}
           )
+          if (partnerId) {
+            for (let pmi = 0; pmi < updated.length; pmi++) {
+              const pIdx = updated[pmi][clef].findIndex(n => n.id === partnerId)
+              if (pIdx === -1) continue
+              const pNote = updated[pmi][clef][pIdx]
+              if (pNote.isRest || pNote.isTripletPlaceholder) break
+              updated = updated.map((m, mi) =>
+                mi !== pmi ? m : { ...m, [clef]: m[clef].map((n, ni) =>
+                  ni !== pIdx ? n : { ...pNote, accidental: newAcc }
+                )}
+              )
+              break
+            }
+          }
+          return updated
         }
       }
       return prev
@@ -448,13 +889,14 @@ export default function Home() {
 
   function editSelectedNoteDot() {
     pushUndo()
+    const partnerId = mode === 'check' ? findUnisonPartner(measuresRef.current, selectedNoteId) : null
     setMeasures(prev => {
       for (let mIdx = 0; mIdx < prev.length; mIdx++) {
         for (const clef of ['treble', 'bass']) {
           const noteIdx = prev[mIdx][clef].findIndex(n => n.id === selectedNoteId)
           if (noteIdx === -1) continue
           const note = prev[mIdx][clef][noteIdx]
-          if (note.isRest || note.triplet || note.duration === '16' || note.isTripletPlaceholder) return prev
+          if (note.triplet || note.duration === '16' || note.isTripletPlaceholder) return prev
           const willBeDotted = !(note.dotted ?? false)
           if (willBeDotted) {
             const cap        = getMeasureCap(mIdx, prev.length)
@@ -464,9 +906,24 @@ export default function Home() {
             if (otherTicks + baseTicks * 1.5 > cap) return prev
           }
           const newNote = { ...note, dotted: willBeDotted || undefined }
-          return prev.map((m, mi) =>
+          let updated = prev.map((m, mi) =>
             mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) => ni !== noteIdx ? n : newNote) }
           )
+          if (partnerId) {
+            for (let pmi = 0; pmi < updated.length; pmi++) {
+              const pIdx = updated[pmi][clef].findIndex(n => n.id === partnerId)
+              if (pIdx === -1) continue
+              const pNote = updated[pmi][clef][pIdx]
+              if (pNote.isRest || pNote.triplet || pNote.duration === '16' || pNote.isTripletPlaceholder) break
+              updated = updated.map((m, mi) =>
+                mi !== pmi ? m : { ...m, [clef]: m[clef].map((n, ni) =>
+                  ni !== pIdx ? n : { ...pNote, dotted: willBeDotted || undefined }
+                )}
+              )
+              break
+            }
+          }
+          return updated
         }
       }
       return prev
@@ -497,12 +954,37 @@ export default function Home() {
         }
         // All guards passed — will mutate
         pushUndo()
+        const partnerId = mode === 'check' ? findUnisonPartner(measuresRef.current, selectedNoteId) : null
         const newNote = { ...note, tieAfter: newTieAfter || undefined }
-        setMeasures(prev =>
-          prev.map((m, mi) =>
+        setMeasures(prev => {
+          let updated = prev.map((m, mi) =>
             mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) => ni !== noteIdx ? n : newNote) }
           )
-        )
+          if (partnerId) {
+            for (let pmi = 0; pmi < updated.length; pmi++) {
+              const pIdx = updated[pmi][clef].findIndex(n => n.id === partnerId)
+              if (pIdx === -1) continue
+              const pNote = updated[pmi][clef][pIdx]
+              if (pNote.isRest || pNote.isTripletPlaceholder) break
+              // Validate tie for partner: next note in partner's voice must be same pitch
+              const partnerSameM = updated[pmi][clef]
+              const partnerNextM = updated[pmi + 1]?.[clef] ?? []
+              const pInSame      = pIdx + 1 < partnerSameM.length
+              const pNext        = pInSame ? partnerSameM[pIdx + 1] : partnerNextM[0]
+              const pNextPrev    = pInSame ? partnerSameM.slice(0, pIdx + 1) : []
+              if (newTieAfter && (!pNext || pNext.isRest ||
+                getEffectiveSemitones(pNote, partnerSameM.slice(0, pIdx), keyAcc) !==
+                getEffectiveSemitones(pNext, pNextPrev, keyAcc))) break
+              updated = updated.map((m, mi) =>
+                mi !== pmi ? m : { ...m, [clef]: m[clef].map((n, ni) =>
+                  ni !== pIdx ? n : { ...pNote, tieAfter: newTieAfter || undefined }
+                )}
+              )
+              break
+            }
+          }
+          return updated
+        })
         setIsTie(prev => !prev)
         return
       }
@@ -566,18 +1048,206 @@ export default function Home() {
 
   // ── Time signature ───────────────────────────────────────────────
   function changeTimeSig(ts) {
-    setUndoStack([])
+    // Push undo snapshot with clean measures (strip any in-progress triplet placeholders)
+    const cleanMeasures = measuresRef.current.map(m => ({
+      ...m,
+      treble: m.treble.filter(n => !n.isTripletPlaceholder),
+      bass:   m.bass.filter(n => !n.isTripletPlaceholder),
+    }))
+    setUndoStack(prev => [...prev.slice(-(MAX_UNDO - 1)), {
+      measures: cleanMeasures,
+      anacrusis: anacrusisRef.current,
+      timeSignature: timeSignatureRef.current,
+      savedCheckMeasures: savedCheckMeasuresRef.current,
+    }])
+
     setTimeSignature(ts)
-    setAnacrusis({ enabled: false, q: 0, e: 0, s: 0 })
-    setMeasures([EMPTY_MEASURE()])
+    setAnacrusis({ enabled: false, e: 0, s: 0 })
     setSelectedNoteId(null)
     setHarmonizeVariants([])
     setHarmonizeError(null)
-    cancelTripletBuffer()
+    setPendingTriplet(null)
+    savedCheckMeasuresRef.current = null
+
+    setMeasures(prev => {
+      const newCap    = measureCapacity(ts)
+      const prevCount = prev.length
+
+      // Collect all user-entered notes (exclude triplet placeholders)
+      const allTreble = prev.flatMap(m => m.treble.filter(n => !n.isTripletPlaceholder))
+      const allBass   = prev.flatMap(m => m.bass.filter(n => !n.isTripletPlaceholder))
+
+      const trebleParts = splitIntoMeasures(allTreble, newCap)
+      const bassParts   = splitIntoMeasures(allBass,   newCap)
+
+      // Preserve user's measure count; expand if notes need more measures
+      const neededCount = Math.max(prevCount, trebleParts.length, bassParts.length)
+      const totalCount  = Math.min(MAX_MEASURES, neededCount)
+
+      return Array.from({ length: totalCount }, (_, i) => ({
+        treble: trebleParts[i] ?? [],
+        bass:   bassParts[i]   ?? [],
+      }))
+    })
   }
 
   // ── Note mutations ───────────────────────────────────────────────
-  function addNoteByDrop({ measureIdx, clef, pitch, octave }) {
+
+  // Check-mode only: insert a note at a specific time position (tick).
+  // voiceHint (previewVoice from Staff) is the authoritative voice the note belongs to;
+  // it supersedes pitch-based re-derivation so preview and click always agree.
+  // Notes are kept sorted by positionTick within the clef array.
+  function addNoteToCheckPosition(measureIdx, clef, pitch, octave, targetTick, voiceHint) {
+    if (!drag || pendingTriplet !== null) return
+    const { duration, isRest: dropRest, dotted: dropDotted } = drag
+    const effectiveDotted = duration === '16' ? false : dropDotted
+    const noteDurTicks    = NOTE_TICKS[duration] ?? 4
+    const noteActualTicks = effectiveDotted ? noteDurTicks * 1.5 : noteDurTicks
+
+    if (measureIdx >= measures.length) return
+    const cap = getMeasureCap(measureIdx, measures.length)
+    if (Math.round((targetTick + noteActualTicks) * 10000) / 10000 > cap) return
+
+    const upperVoice = clef === 'treble' ? 'soprano' : 'tenor'
+    const lowerVoice = clef === 'treble' ? 'alto'    : 'bass'
+    const dt       = (p, o) => o * 7 + DIATONIC.indexOf(p)
+    const getTotal = n => n.isRest ? -Infinity : dt(n.pitch, n.octave)
+    const newTotal = dropRest ? -Infinity : dt(pitch, octave)
+    const noteId   = Date.now()
+
+    const buildNote = (voiceName, stemDirVal) => dropRest
+      ? { pitch: 'b', octave: 4, duration, isRest: true, dotted: effectiveDotted || undefined, id: noteId,
+          voice: voiceName, positionTick: targetTick, stemDir: stemDirVal }
+      : { pitch, octave, duration,
+          accidental: accidental || undefined,
+          dotted: effectiveDotted || undefined,
+          tieAfter: isTie || undefined,
+          id: noteId,
+          voice: voiceName, positionTick: targetTick, stemDir: stemDirVal }
+
+    pushUndo()
+    setSelectedStaff(clef)
+
+    setMeasures(prev => {
+      if (measureIdx >= prev.length) return prev
+      const c = getMeasureCap(measureIdx, prev.length)
+      if (Math.round((targetTick + noteActualTicks) * 10000) / 10000 > c) return prev
+
+      // Preprocess: remove same-voice deletion-rests overlapping [targetTick, spanEnd),
+      // splitting any remainder before/after the new note back into deletion-rests.
+      const hintIsUpperPre = voiceHint != null ? voiceHint !== lowerVoice : null
+      const spanEnd = targetTick + noteActualTicks
+      let current = prev[measureIdx][clef]
+      if (hintIsUpperPre !== null) {
+        const tsd = hintIsUpperPre ? 1 : -1
+        const splitRests = []
+        current = current.filter(n => {
+          if (!n.deletionRest || n.stemDir !== tsd) return true
+          const rs = n.positionTick ?? 0
+          const re = Math.round((rs + noteTicks(n)) * 10000) / 10000
+          if (re <= targetTick + 0.0001 || rs >= spanEnd - 0.0001) return true  // no overlap
+          if (rs < targetTick - 0.0001)
+            splitRests.push(...decomposeRestTicks(rs, targetTick - rs, n.voice, tsd))
+          if (re > spanEnd + 0.0001)
+            splitRests.push(...decomposeRestTicks(spanEnd, re - spanEnd, n.voice, tsd))
+          return false
+        })
+        if (splitRests.length > 0)
+          current = [...current, ...splitRests]
+            .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+      }
+
+      const atTick  = current.filter(n => n.positionTick === targetTick)
+      // Notes strictly inside the new note's span (not at targetTick itself)
+      const inSpan  = current.filter(n => n.positionTick > targetTick && n.positionTick < spanEnd)
+      const outside = current.filter(n => n.positionTick !== targetTick && (n.positionTick <= targetTick || n.positionTick >= spanEnd))
+
+      let finalAtTick
+      let isUpper
+
+      // newIsUpper: trust voiceHint (from preview) when available; fall back to pitch comparison
+      const hintIsUpper = voiceHint != null ? voiceHint !== lowerVoice : null
+
+      if (atTick.length === 0) {
+        isUpper = hintIsUpper ?? true
+        finalAtTick = isUpper
+          ? [buildNote(upperVoice,  1)]
+          : [buildNote(lowerVoice, -1)]
+
+      } else if (atTick.length === 1) {
+        const existTotal = getTotal(atTick[0])
+        isUpper    = hintIsUpper ?? (newTotal > existTotal)
+        if (isUpper) {
+          finalAtTick = [buildNote(upperVoice, 1), { ...atTick[0], voice: lowerVoice, stemDir: -1 }]
+        } else {
+          finalAtTick = [{ ...atTick[0], voice: upperVoice, stemDir: 1 }, buildNote(lowerVoice, -1)]
+        }
+
+      } else {
+        // 2 notes at this tick — trust voiceHint or replace the closer-pitch voice
+        const sorted   = [...atTick].sort((a, b) => getTotal(b) - getTotal(a))
+        const [hi, lo] = sorted
+        const hiTotal  = getTotal(hi)
+        const loTotal  = getTotal(lo)
+
+        isUpper = hintIsUpper ?? (() => {
+          if (newTotal >= hiTotal) return true
+          if (newTotal <= loTotal) return false
+          return (hiTotal - newTotal) <= (newTotal - loTotal)
+        })()
+
+        if (isUpper) {
+          finalAtTick = [buildNote(upperVoice, 1), { ...lo, voice: lowerVoice, stemDir: -1 }]
+        } else {
+          finalAtTick = [{ ...hi, voice: upperVoice, stemDir: 1 }, buildNote(lowerVoice, -1)]
+        }
+      }
+
+      // If the new note is upper, demote any upper-voice notes within its span to lower voice.
+      // This handles the case where short notes were provisionally placed in upper voice
+      // before a longer upper-voice note was added above them.
+      const finalInSpan = inSpan.map(n =>
+        isUpper && n.stemDir !== -1
+          ? { ...n, voice: lowerVoice, stemDir: -1 }
+          : n
+      )
+
+      const newNotes = [...outside, ...finalAtTick, ...finalInSpan]
+        .sort((a, b) => (a.positionTick ?? Infinity) - (b.positionTick ?? Infinity))
+
+      // Block placement if the new note's pitch crosses any concurrent opposite-voice note.
+      // This catches cases where the voice hint contradicts pitch order, or where a long
+      // note in one voice overlaps a new note at a different tick in the other voice.
+      if (!dropRest) {
+        const newEntry   = newNotes.find(n => n.id === noteId)
+        if (newEntry) {
+          const isNewUpper = newEntry.stemDir !== -1
+          const newDT      = dt(pitch, octave)
+          const oppDir     = isNewUpper ? -1 : 1
+          const concurrent = newNotes.filter(n => {
+            if (n.id === noteId || n.isRest || n.stemDir !== oppDir || n.positionTick == null) return false
+            const nStart = n.positionTick
+            const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+            return nStart < spanEnd && nEnd > targetTick
+          })
+          if (concurrent.length > 0) {
+            const cDTs = concurrent.map(n => dt(n.pitch, n.octave))
+            if ( isNewUpper && newDT < Math.max(...cDTs)) return prev
+            if (!isNewUpper && newDT > Math.min(...cDTs)) return prev
+          }
+        }
+      }
+
+      return prev.map((m, i) => i !== measureIdx ? m : { ...m, [clef]: newNotes })
+    })
+  }
+
+  function addNoteByDrop({ measureIdx, clef, pitch, octave, targetTick, previewVoice }) {
+    // In Check mode all drops go through the time-position path
+    if (mode === 'check' && targetTick != null) {
+      addNoteToCheckPosition(measureIdx, clef, pitch, octave, targetTick, previewVoice)
+      return
+    }
     if (!drag) return
     const { duration, isRest: dropRest, dotted: dropDotted } = drag
     const effectiveDotted = duration === '16' ? false : dropDotted
@@ -668,7 +1338,7 @@ export default function Home() {
       const c = getMeasureCap(measureIdx, prev.length)
       if (!canAdd(prev[measureIdx][clef], duration, c, effectiveDotted)) return prev
       const note = dropRest
-        ? { pitch: 'b', octave: 4, duration, isRest: true, id: Date.now() }
+        ? { pitch: 'b', octave: 4, duration, isRest: true, dotted: effectiveDotted || undefined, id: Date.now() }
         : { pitch, octave, duration, accidental: accidental || undefined, dotted: effectiveDotted || undefined, tieAfter: isTie || undefined, id: Date.now() }
       return prev.map((m, i) =>
         i !== measureIdx ? m : { ...m, [clef]: [...m[clef], note] }
@@ -693,28 +1363,33 @@ export default function Home() {
     })
   }
 
-  function handleSetMeasureCount(n) {
-    const minAllowed = hasAnacrusis ? 2 : 1
-    const effectiveTarget = Math.min(MAX_MEASURES, Math.max(minAllowed, n))
-    if (effectiveTarget <= measures.length) return
+  function handleSetMeasureCount(displayedN) {
+    // displayedN is the count excluding the pickup measure.
+    // Convert to actual array length before comparing/adding.
+    const offset = hasAnacrusis ? 1 : 0
+    const target = Math.min(MAX_MEASURES, Math.max(offset + 1, displayedN + offset))
+    if (target === measures.length) return
     pushUndo()
-    setMeasures(prev => [
-      ...prev,
-      ...Array.from({ length: effectiveTarget - prev.length }, () => EMPTY_MEASURE()),
-    ])
+    setMeasures(prev => {
+      if (target > prev.length) {
+        return [...prev, ...Array.from({ length: target - prev.length }, () => EMPTY_MEASURE())]
+      }
+      return prev.slice(0, target)
+    })
   }
 
   function clearAll() {
-    setUndoStack([])
+    pushUndo()
+    setPendingTriplet(null)
     setSelectedNoteId(null)
     setMeasures(hasAnacrusis ? [PICKUP_MEASURE(), EMPTY_MEASURE()] : [EMPTY_MEASURE()])
     setHarmonizeVariants([])
     setHarmonizeError(null)
-    cancelTripletBuffer()
+    savedCheckMeasuresRef.current = null
   }
 
   function exportJson() {
-    downloadScoreJson({ measures, timeSignature, tonality, anacruisTicks })
+    downloadScoreJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
   }
 
   // ── Harmonization ────────────────────────────────────────────────
@@ -722,7 +1397,7 @@ export default function Home() {
     setIsHarmonizing(true)
     setHarmonizeError(null)
     try {
-      const scoreJson = scoreToJson({ measures, timeSignature, tonality, anacruisTicks })
+      const scoreJson = scoreToJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
       const variants  = await harmonizeScore(scoreJson)
       setHarmonizeVariants(variants)
       setSelectedVariantIdx(0)
@@ -732,6 +1407,16 @@ export default function Home() {
     } finally {
       setIsHarmonizing(false)
     }
+  }
+
+  function toggleMode(id) {
+    setSelectedModes(prev => {
+      if (prev.includes(id)) {
+        const next = prev.filter(x => x !== id)
+        return next.length === 0 ? ['natural'] : next
+      }
+      return [...prev, id]
+    })
   }
 
   function toggleForbiddenRule(id) {
@@ -752,6 +1437,76 @@ export default function Home() {
     )
   }
 
+  // ── Mode switching ───────────────────────────────────────────────
+  const annotateForCheck = (notes, voiceName, stemDirVal) => {
+    let cursor = 0
+    return notes.map(note => {
+      const tick = cursor
+      cursor = Math.round((cursor + noteTicks(note)) * 10000) / 10000
+      return { ...note, voice: voiceName, stemDir: stemDirVal, positionTick: tick }
+    })
+  }
+
+  // harmonize → check: stamp every note with positionTick / voice / stemDir.
+  // If returning from a prior check→harmonize trip, merge soprano/bass from
+  // harmonize mode back into the preserved alto/tenor from savedCheckMeasuresRef.
+  function switchToCheck() {
+    if (mode === 'harmonize') {
+      const saved = savedCheckMeasuresRef.current
+      if (saved) {
+        setMeasures(prev => {
+          const len = Math.max(prev.length, saved.length)
+          return Array.from({ length: len }, (_, i) => {
+            const hm = prev[i]  ?? EMPTY_MEASURE()
+            const sc = saved[i] ?? EMPTY_MEASURE()
+            const sopranoNotes = annotateForCheck(hm.treble, 'soprano',  1)
+            const bassNotes    = annotateForCheck(hm.bass,   'bass',    -1)
+            const altoNotes    = sc.treble.filter(n => n.voice === 'alto')
+            const tenorNotes   = sc.bass.filter(n => n.voice === 'tenor')
+            const newTreble    = [...sopranoNotes, ...altoNotes]
+              .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+            const newBass      = [...tenorNotes, ...bassNotes]
+              .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+            return {
+              ...(hm.isPickup || sc.isPickup ? { isPickup: true } : {}),
+              treble: newTreble,
+              bass:   newBass,
+            }
+          })
+        })
+      } else {
+        setMeasures(prev => prev.map(m => ({
+          ...m,
+          treble: annotateForCheck(m.treble, 'soprano',  1),
+          bass:   annotateForCheck(m.bass,   'bass',    -1),
+        })))
+      }
+    }
+    setMode('check')
+  }
+
+  // check → harmonize: save the full 4-voice state, then keep only outer voices,
+  // sort by positionTick, strip check-mode fields so the single-voice renderer sees a plain list.
+  function switchToHarmonize() {
+    if (mode === 'check') {
+      savedCheckMeasuresRef.current = measuresRef.current
+      setMeasures(prev => prev.map(m => {
+        const cleanNotes = (notes, keepVoice) => {
+          const filtered = notes
+            .filter(n => n.voice == null || n.voice === keepVoice)
+            .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+          return filtered.map(({ voice: _v, stemDir: _s, positionTick: _p, ...rest }) => rest)
+        }
+        return {
+          ...m,
+          treble: cleanNotes(m.treble, 'soprano'),
+          bass:   cleanNotes(m.bass,   'bass'),
+        }
+      }))
+    }
+    setMode('harmonize')
+  }
+
   function handleSelectClef(clef) {
     setClefMode(clef)
     setSelectedStaff(clef)
@@ -767,24 +1522,26 @@ export default function Home() {
   }
 
   // ── Derived state for toolbar ────────────────────────────────────
-  const canUndo   = pendingTriplet !== null || undoStack.length > 0
-  const canRemove = measures.length > (hasAnacrusis ? 2 : 1)
+  const canUndo      = pendingTriplet !== null || undoStack.length > 0
+  const canRemove    = measures.length > (hasAnacrusis ? 2 : 1)
+  const canAddMeasure = measures.length < MAX_MEASURES
 
   return (
     <div className="app">
       <div className="workspace">
-        <div className="mode-bar">
-          <button
-            className={`mode-tab${mode === 'harmonize' ? ' mode-active' : ''}`}
-            onClick={() => setMode('harmonize')}
-          >ГАРМОНІЗУВАТИ</button>
-          <button
-            className={`mode-tab${mode === 'check' ? ' mode-active' : ''}`}
-            onClick={() => setMode('check')}
-          >ПЕРЕВІРИТИ</button>
-        </div>
+        <div className="workspace-toolbar">
+          <div className="mode-bar">
+            <button
+              className={`mode-tab${mode === 'harmonize' ? ' mode-active' : ''}`}
+              onClick={switchToHarmonize}
+            >ГАРМОНІЗУВАТИ</button>
+            <button
+              className={`mode-tab${mode === 'check' ? ' mode-active' : ''}`}
+              onClick={switchToCheck}
+            >ПЕРЕВІРИТИ</button>
+          </div>
 
-      <NoteToolbar
+        <NoteToolbar
         durations={DURATIONS}
         timeSigs={TIME_SIGNATURES}
         selected={selectedNote}
@@ -793,7 +1550,8 @@ export default function Home() {
         onSelectTimeSig={changeTimeSig}
         onStartDrag={startDrag}
         onUndo={undo}
-        onClear={clearAll}
+        hasSelectedNote={isEditMode && !!selectedNoteId}
+        onClear={() => isEditMode && selectedNoteId ? deleteSelectedNote() : clearAll()}
         tonality={tonality}
         onSelectTonality={setTonality}
         accidental={accidental}
@@ -809,8 +1567,8 @@ export default function Home() {
         onToggleTriplet={() => isEditMode && selectedNoteId ? editSelectedNoteTriplet() : handleToggleTriplet()}
         anacrusis={anacrusis}
         anacruisTicks={anacruisTicks}
-        normalCap={normalCap}
-        onChangeAnacrusis={setAnacrusis}
+        maxAnacruisTicks={maxAnacruisTicks}
+        onChangeAnacrusis={handleChangeAnacrusis}
         onAddMeasure={addMeasure}
         onRemoveMeasure={removeMeasure}
         canUndo={canUndo}
@@ -820,8 +1578,9 @@ export default function Home() {
         onSelectClef={handleSelectClef}
         isEditMode={isEditMode}
         onToggleEditMode={handleToggleEditMode}
-        onDeleteSelected={deleteSelectedNote}
-        canDeleteNote={isEditMode && !!selectedNoteId}
+
+        selectedModes={selectedModes}
+        onToggleMode={toggleMode}
         onHarmonize={requestHarmonize}
         isHarmonizing={isHarmonizing}
         isCheck={mode === 'check'}
@@ -833,9 +1592,11 @@ export default function Home() {
         allowedChords={ALLOWED_CHORDS}
         selectedAllowedChords={selectedAllowedChords}
         onToggleAllowedChord={toggleAllowedChord}
-        measuresCount={measures.length}
+        measuresCount={measures.length - (hasAnacrusis ? 1 : 0)}
+        canAddMeasure={canAddMeasure}
         onSetMeasureCount={handleSetMeasureCount}
       />
+        </div>
 
       <Staff
         measures={measures}
@@ -853,6 +1614,7 @@ export default function Home() {
         isTriplet={isTriplet}
         tripletCount={tripletCount}
         pendingTriplet={pendingTriplet}
+        isCheckMode={mode === 'check'}
       />
       </div>
 
