@@ -1,13 +1,6 @@
 // German/Ukrainian notation → VexFlow key signature
 // acc: negative = flats, positive = sharps, 0 = no accidentals
 export const TONALITIES = [
-  { key: 'As',  label: 'ля♭ мажор',    vexKey: 'Ab', acc: -4, major: true  },
-  { key: 'A',   label: 'ля мажор',      vexKey: 'A',  acc:  3, major: true  },
-  { key: 'a',   label: 'ля мінор',      vexKey: 'C',  acc:  0, major: false },
-  { key: 'B',   label: 'сі♭ мажор',    vexKey: 'Bb', acc: -2, major: true  },
-  { key: 'b',   label: 'сі♭ мінор',    vexKey: 'Db', acc: -5, major: false },
-  { key: 'H',   label: 'сі мажор',      vexKey: 'B',  acc:  5, major: true  },
-  { key: 'h',   label: 'сі мінор',      vexKey: 'D',  acc:  2, major: false },
   { key: 'C',   label: 'до мажор',      vexKey: 'C',  acc:  0, major: true  },
   { key: 'c',   label: 'до мінор',      vexKey: 'Eb', acc: -3, major: false },
   { key: 'cis', label: 'до# мінор',     vexKey: 'E',  acc:  4, major: false },
@@ -25,6 +18,13 @@ export const TONALITIES = [
   { key: 'G',   label: 'соль мажор',    vexKey: 'G',  acc:  1, major: true  },
   { key: 'g',   label: 'соль мінор',    vexKey: 'Bb', acc: -2, major: false },
   { key: 'gis', label: 'соль# мінор',   vexKey: 'B',  acc:  5, major: false },
+  { key: 'As',  label: 'ля♭ мажор',    vexKey: 'Ab', acc: -4, major: true  },
+  { key: 'A',   label: 'ля мажор',      vexKey: 'A',  acc:  3, major: true  },
+  { key: 'a',   label: 'ля мінор',      vexKey: 'C',  acc:  0, major: false },
+  { key: 'B',   label: 'сі♭ мажор',    vexKey: 'Bb', acc: -2, major: true  },
+  { key: 'b',   label: 'сі♭ мінор',    vexKey: 'Db', acc: -5, major: false },
+  { key: 'H',   label: 'сі мажор',      vexKey: 'B',  acc:  5, major: true  },
+  { key: 'h',   label: 'сі мінор',      vexKey: 'D',  acc:  2, major: false },
 ]
 
 export const DEFAULT_TONALITY = TONALITIES.find(t => t.key === 'C')

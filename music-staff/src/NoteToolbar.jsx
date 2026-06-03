@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
 import KeyPicker from './KeyPicker'
+import { getPlaybackBpm } from './usePlayback'
 
-// Number spinner whose value can only be changed via the browser's up/down arrows.
-// Keyboard text entry is blocked so leading-zero strings ("03", "00000") are impossible.
+// Number spinner whose value can only be changed via the native up/down arrow buttons.
+// Clicking the text area never shows a caret: focus is immediately blurred on entry.
+// The spinner's change event fires during mousedown (before focus), so the value
+// update is captured before the blur — arrows stay fully functional.
 // The onChange prop receives a clamped integer in [0, maxValue].
 function AnacrusisInput({ value, maxValue, onChange }) {
   const safeMax = Math.max(0, maxValue)
@@ -13,15 +16,11 @@ function AnacrusisInput({ value, maxValue, onChange }) {
       value={value}
       min={0}
       max={safeMax}
+      tabIndex={-1}
+      onFocus={e => e.target.blur()}
       onChange={e => {
         const parsed = parseInt(e.target.value, 10)
         if (!isNaN(parsed)) onChange(Math.max(0, Math.min(safeMax, parsed)))
-      }}
-      onKeyDown={e => {
-        // Allow only Tab and the arrow keys that drive the native spinner.
-        if (e.key !== 'Tab' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
-          e.preventDefault()
-        }
       }}
     />
   )
@@ -146,6 +145,8 @@ export default function NoteToolbar({
   forbiddenRules = [], selectedForbiddenRules = [], onToggleForbiddenRule,
   allowedChords  = [], selectedAllowedChords  = [], onToggleAllowedChord,
   measuresCount = 1, canAddMeasure = true, onSetMeasureCount,
+  playbackState = 'idle', onPlay, onPause, onStop,
+  playbackSpeedMode = 'fast', onSetSpeedMode,
 }) {
 
   const [measureInputVal, setMeasureInputVal] = useState(String(measuresCount))
@@ -179,7 +180,7 @@ export default function NoteToolbar({
   }
 
   const measureCountRow = (
-    <div className="measure-count-row">
+    <div className={`measure-count-row${isHarmonize ? ' measure-count-row--harmonize' : ''}${isCheck ? ' measure-count-row--check' : ''}`}>
       <button
         className="btn-measure-step"
         onClick={() => onRemoveMeasure && onRemoveMeasure()}
@@ -194,6 +195,7 @@ export default function NoteToolbar({
         onChange={handleMeasureInputChange}
         onFocus={handleMeasureInputFocus}
         onBlur={handleMeasureInputBlur}
+        onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }}
       />
       <button
         className="btn-measure-step"
@@ -201,6 +203,39 @@ export default function NoteToolbar({
         disabled={!canAddMeasure}
         title="Збільшити кількість тактів"
       >+</button>
+    </div>
+  )
+
+  const playbackButtons = (
+    <div className="toolbar-ctrl-buttons">
+      <button
+        className={`btn-ctrl btn-ctrl-speed${playbackSpeedMode === 'slow' ? ' active' : ''}`}
+        onClick={() => onSetSpeedMode && onSetSpeedMode('slow')}
+        title={`Повільний темп (${getPlaybackBpm(timeSignature, 'slow')} BPM)`}
+      >slow</button>
+      <button
+        className={`btn-ctrl btn-ctrl-speed${playbackSpeedMode === 'fast' ? ' active' : ''}`}
+        onClick={() => onSetSpeedMode && onSetSpeedMode('fast')}
+        title={`Швидкий темп (${getPlaybackBpm(timeSignature, 'fast')} BPM)`}
+      >fast</button>
+      <button
+        className={`btn-ctrl btn-ctrl-play${playbackState === 'playing' ? ' playing' : ''}`}
+        onClick={onPlay}
+        disabled={playbackState === 'playing'}
+        title={playbackState === 'paused' ? 'Продовжити' : 'Відтворити'}
+      >▶</button>
+      <button
+        className="btn-ctrl btn-ctrl-pause"
+        onClick={onPause}
+        disabled={playbackState !== 'playing'}
+        title="Пауза"
+      >⏸</button>
+      <button
+        className="btn-ctrl btn-ctrl-stop"
+        onClick={onStop}
+        disabled={playbackState === 'idle'}
+        title="Зупинити"
+      >⏹</button>
     </div>
   )
 
@@ -232,8 +267,7 @@ export default function NoteToolbar({
       {isHarmonize && (
         <div className="toolbar-col">
           <div className="toolbar-group">
-            <span className="toolbar-label">Голос</span>
-            <div className="clef-switcher">
+            <div className={`clef-switcher${isHarmonize ? ' clef-switcher--harmonize' : ''}`}>
               <button
                 className={`btn-note${clefMode === 'treble' ? ' active' : ''}`}
                 onClick={() => onSelectClef('treble')}
@@ -252,7 +286,7 @@ export default function NoteToolbar({
       )}
 
       {/* ─── Col 2/1: Tonality + [Mode (harmonize) | MeasureCount (check)] ── */}
-      <div className="toolbar-col">
+      <div className="toolbar-col toolbar-col--key">
         <div className="toolbar-group">
           <span className="toolbar-label">Тональність</span>
           <KeyPicker value={tonality} onChange={onSelectTonality} />
@@ -329,12 +363,18 @@ export default function NoteToolbar({
                 onClick={() => onSelectAccidental(a.id)}
               >{a.label}</button>
             ))}
-            <button
-              className={`btn-dur${isTriplet ? ' active' : ''}`}
-              title="Тріоль — три ноти замість двох (3:2)"
-              onClick={onToggleTriplet}
-              style={{ fontSize: isTriplet && tripletCount > 0 ? '0.7rem' : '0.9rem', fontWeight: 700 }}
-            >{isTriplet && tripletCount > 0 ? `${tripletCount}/3` : '³'}</button>
+            {(() => {
+              const tripletDisabled = parseInt(timeSignature?.split('/')[1] ?? '4', 10) === 8
+              return (
+                <button
+                  className={`btn-dur${isTriplet ? ' active' : ''}`}
+                  title={tripletDisabled ? 'Тріоль недоступна для розмірів x/8' : 'Тріоль — три ноти замість двох (3:2)'}
+                  onClick={tripletDisabled ? undefined : onToggleTriplet}
+                  disabled={tripletDisabled}
+                  style={{ fontSize: isTriplet && tripletCount > 0 ? '0.7rem' : '0.9rem', fontWeight: 700 }}
+                >{isTriplet && tripletCount > 0 ? `${tripletCount}/3` : '³'}</button>
+              )
+            })()}
 
             {/* Row 2: rests + tie */}
             {durations.map(d => (
@@ -371,18 +411,18 @@ export default function NoteToolbar({
         </div>
       </div>
 
-      {/* ─── Col 5/4: Restrictions + [Allowed chords (harmonize) | Ctrl buttons (check)] ── */}
-      <div className="toolbar-col">
-        <div className="toolbar-group">
-          <span className="toolbar-label">Заборони</span>
-          <MultiCheckDropdown
-            label="Заборони"
-            options={forbiddenRules}
-            selected={selectedForbiddenRules}
-            onToggle={onToggleForbiddenRule}
-          />
-        </div>
-        {isHarmonize && (
+      {/* ─── Col 5/4 (harmonize only): Restrictions + Allowed chords ── */}
+      {isHarmonize && (
+        <div className="toolbar-col">
+          <div className="toolbar-group">
+            <span className="toolbar-label">Заборони</span>
+            <MultiCheckDropdown
+              label="Заборони"
+              options={forbiddenRules}
+              selected={selectedForbiddenRules}
+              onToggle={onToggleForbiddenRule}
+            />
+          </div>
           <div className="toolbar-group">
             <span className="toolbar-label">Допустимі акорди</span>
             <MultiCheckDropdown
@@ -392,13 +432,12 @@ export default function NoteToolbar({
               onToggle={onToggleAllowedChord}
             />
           </div>
-        )}
-        {isCheck && ctrlButtons}
-      </div>
+        </div>
+      )}
 
-      {/* ─── Col 6 (harmonize): Harmonize button + Ctrl buttons ──────── */}
+      {/* ─── Col 6 (harmonize): Harmonize button + Playback + Ctrl buttons ── */}
       {isHarmonize && (
-        <div className="toolbar-col">
+        <div className="toolbar-col toolbar-col--actions">
           <button
             className="btn-action btn-harmonize"
             onClick={onHarmonize}
@@ -407,13 +446,14 @@ export default function NoteToolbar({
           >
             {isHarmonizing ? 'Гармонізую...' : 'Гармонізувати!'}
           </button>
+          {playbackButtons}
           {ctrlButtons}
         </div>
       )}
 
-      {/* ─── Col 5 (check): Check button ─────────────────────────────── */}
+      {/* ─── Col 5 (check): Check button + Playback + Ctrl buttons ──── */}
       {isCheck && (
-        <div className="toolbar-col">
+        <div className="toolbar-col toolbar-col--actions">
           <button
             className="btn-action btn-check"
             onClick={onCheck}
@@ -422,6 +462,8 @@ export default function NoteToolbar({
           >
             {isChecking ? 'Перевіряю...' : 'Перевірити!'}
           </button>
+          {playbackButtons}
+          {ctrlButtons}
         </div>
       )}
 

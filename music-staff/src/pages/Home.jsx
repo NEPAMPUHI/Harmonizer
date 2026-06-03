@@ -6,6 +6,8 @@ import { DEFAULT_TONALITY } from '../tonalities'
 import { getKeyAccidentals, getEffectiveSemitones } from '../pitchUtils'
 import { downloadScoreJson, scoreToJson } from '../scoreToJson'
 import { harmonizeScore } from '../api'
+import { usePlayback, getPlaybackBpm } from '../usePlayback'
+import { exportSvgToPng } from '../exportPng'
 
 // Allowed note range per clef (diatonic totals = octave×7 + pitch_index)
 const NOTE_RANGE = {
@@ -360,9 +362,10 @@ export default function Home() {
   const [isTie,          setIsTie]          = useState(false)
   const [anacrusis,      setAnacrusis]      = useState({ enabled: false, e: 0, s: 0 })
   const [selectedNoteId, setSelectedNoteId] = useState(null)
-  const [isEditMode,     setIsEditMode]     = useState(false)
-  const [mode,           setMode]           = useState('harmonize')
-  const [clefMode,       setClefMode]       = useState('treble')
+  const [isEditMode,       setIsEditMode]       = useState(false)
+  const [mode,             setMode]             = useState('harmonize')
+  const [clefMode,         setClefMode]         = useState('treble')
+  const [playbackSpeedMode, setPlaybackSpeedMode] = useState('fast')
 
   // Always-current ref used by the key handler and undo to read state without stale closures
   const measuresRef = useRef(measures)
@@ -406,10 +409,17 @@ export default function Home() {
   const tripletCount = 3 - (pendingTriplet?.remainingUnits ?? 0)
 
   // ── Harmonization results ────────────────────────────────────────
+  // uiState controls which panel is shown in the main workspace area:
+  //   'editing'               — NoteToolbar + Staff (default)
+  //   'harmonizingLoading'    — loading spinner while waiting for the backend
+  //   'harmonizationResults'  — variant tabs + result Staff
+  const [uiState,             setUiState]             = useState('editing')
   const [harmonizeVariants,   setHarmonizeVariants]   = useState([])
-  const [isHarmonizing,       setIsHarmonizing]       = useState(false)
   const [harmonizeError,      setHarmonizeError]      = useState(null)
   const [selectedVariantIdx,  setSelectedVariantIdx]  = useState(0)
+  const [dlDropdownOpen,      setDlDropdownOpen]      = useState(false)
+  const dlDropdownRef   = useRef(null)
+  const resultStaffRef  = useRef(null)
 
   // ── Check mode ───────────────────────────────────────────────────
   const [isChecking, setIsChecking] = useState(false)
@@ -430,6 +440,29 @@ export default function Home() {
   const anacruisTicks    = anacrusis.enabled && rawAnacruisTicks > 0 && rawAnacruisTicks < normalCap
     ? rawAnacruisTicks : 0
   const hasAnacrusis = anacruisTicks > 0
+
+  // ── Playback ─────────────────────────────────────────────────────
+  const isResultsMode = uiState === 'harmonizationResults'
+  const playbackMeasures = isResultsMode
+    ? (harmonizeVariants[selectedVariantIdx]?.measures ?? [])
+    : measures
+  const {
+    playbackState,
+    currentTick,
+    totalTicks,
+    timeline,
+    play:  handlePlay,
+    pause: handlePause,
+    stop:  handleStop,
+  } = usePlayback({
+    measures:   playbackMeasures,
+    timeSignature,
+    tonality,
+    anacruisTicks,
+    mode:       isResultsMode ? 'harmonize' : mode,
+    audioClef:  isResultsMode ? null : (mode === 'harmonize' ? clefMode : null),
+    bpm: getPlaybackBpm(timeSignature, playbackSpeedMode),
+  })
 
   // Maximum allowed anacrusis ticks.
   // When rawAnacruisTicks is already > 0 the pickup exists and the last measure has a
@@ -647,6 +680,19 @@ export default function Home() {
       }
     }
   }, [isEditMode, selectedNoteId])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!dlDropdownOpen) return
+    const handler = (e) => {
+      if (!dlDropdownRef.current?.contains(e.target)) setDlDropdownOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [dlDropdownOpen])
+
+  // Stop playback when leaving results mode or switching variants
+  useEffect(() => { handleStop() }, [uiState])            // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { handleStop() }, [selectedVariantIdx]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Set absolute pitch of a note (called on every mousemove during drag) ─
   // Undo is pushed by Staff via onNoteDragStart, not here.
@@ -898,32 +944,111 @@ export default function Home() {
           const note = prev[mIdx][clef][noteIdx]
           if (note.triplet || note.duration === '16' || note.isTripletPlaceholder) return prev
           const willBeDotted = !(note.dotted ?? false)
-          if (willBeDotted) {
-            const cap        = getMeasureCap(mIdx, prev.length)
-            const baseTicks  = NOTE_TICKS[note.duration] ?? 4
-            const otherTicks = prev[mIdx][clef].reduce((s, n, ni) =>
-              ni !== noteIdx ? s + noteTicks(n) : s, 0)
-            if (otherTicks + baseTicks * 1.5 > cap) return prev
+          const cap       = getMeasureCap(mIdx, prev.length)
+          const baseTicks = NOTE_TICKS[note.duration] ?? 4
+          const oldTicks  = noteTicks(note)
+          const newTicks  = willBeDotted ? baseTicks * 1.5 : baseTicks
+
+          // ── Harmonize mode: linear capacity check ──────────────
+          if (mode !== 'check' || note.positionTick == null) {
+            if (willBeDotted) {
+              const otherTicks = prev[mIdx][clef].reduce((s, n, ni) =>
+                ni !== noteIdx ? s + noteTicks(n) : s, 0)
+              if (otherTicks + newTicks > cap) return prev
+            }
+            const newNote = { ...note, dotted: willBeDotted || undefined }
+            let updated = prev.map((m, mi) =>
+              mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) => ni !== noteIdx ? n : newNote) }
+            )
+            if (partnerId) {
+              for (let pmi = 0; pmi < updated.length; pmi++) {
+                const pIdx = updated[pmi][clef].findIndex(n => n.id === partnerId)
+                if (pIdx === -1) continue
+                const pNote = updated[pmi][clef][pIdx]
+                if (pNote.isRest || pNote.triplet || pNote.duration === '16' || pNote.isTripletPlaceholder) break
+                updated = updated.map((m, mi) =>
+                  mi !== pmi ? m : { ...m, [clef]: m[clef].map((n, ni) =>
+                    ni !== pIdx ? n : { ...pNote, dotted: willBeDotted || undefined }
+                  )}
+                )
+                break
+              }
+            }
+            return updated
           }
-          const newNote = { ...note, dotted: willBeDotted || undefined }
-          let updated = prev.map((m, mi) =>
-            mi !== mIdx ? m : { ...m, [clef]: m[clef].map((n, ni) => ni !== noteIdx ? n : newNote) }
+
+          // ── Check mode: position-aware validation ──────────────
+          const { positionTick, stemDir, voice } = note
+          const newEnd = Math.round((positionTick + newTicks) * 10000) / 10000
+          const oldEnd = Math.round((positionTick + oldTicks) * 10000) / 10000
+
+          if (newEnd > cap + 0.0001) return prev
+
+          const hasOverlap = prev[mIdx][clef].some(n => {
+            if (n.id === note.id || n.stemDir !== stemDir || n.positionTick == null) return false
+            if (n.deletionRest) return false
+            const nStart = n.positionTick
+            const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+            return nStart < newEnd - 0.0001 && nEnd > positionTick + 0.0001
+          })
+          if (hasOverlap) return prev
+
+          let updated = prev[mIdx][clef].map((n, ni) =>
+            ni === noteIdx ? { ...note, dotted: willBeDotted || undefined } : n
           )
+
+          if (newTicks < oldTicks) {
+            // Dot removed: fill freed gap [newEnd, oldEnd) with deletion-rests
+            const newRests = decomposeRestTicks(newEnd, oldTicks - newTicks, voice, stemDir)
+            updated = [...updated, ...newRests]
+              .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+          } else if (newTicks > oldTicks) {
+            // Dot added: consume deletion-rests in the extended span [oldEnd, newEnd)
+            updated = updated.filter(n => {
+              if (!n.deletionRest || n.stemDir !== stemDir) return true
+              const rs = n.positionTick ?? 0
+              const re = Math.round((rs + noteTicks(n)) * 10000) / 10000
+              return !(rs < newEnd - 0.0001 && re > oldEnd - 0.0001)
+            })
+          }
+
+          // Apply same change to unison partner (its voice is independent)
           if (partnerId) {
-            for (let pmi = 0; pmi < updated.length; pmi++) {
-              const pIdx = updated[pmi][clef].findIndex(n => n.id === partnerId)
-              if (pIdx === -1) continue
-              const pNote = updated[pmi][clef][pIdx]
-              if (pNote.isRest || pNote.triplet || pNote.duration === '16' || pNote.isTripletPlaceholder) break
-              updated = updated.map((m, mi) =>
-                mi !== pmi ? m : { ...m, [clef]: m[clef].map((n, ni) =>
-                  ni !== pIdx ? n : { ...pNote, dotted: willBeDotted || undefined }
-                )}
-              )
-              break
+            const pIdx = updated.findIndex(n => n.id === partnerId)
+            if (pIdx !== -1) {
+              const pNote = updated[pIdx]
+              if (!pNote.isRest && !pNote.triplet && pNote.duration !== '16' && !pNote.isTripletPlaceholder) {
+                const { stemDir: pStemDir, voice: pVoice } = pNote
+                const pHasOverlap = updated.some(n => {
+                  if (n.id === partnerId || n.stemDir !== pStemDir || n.positionTick == null) return false
+                  if (n.deletionRest) return false
+                  const nStart = n.positionTick
+                  const nEnd   = Math.round((nStart + noteTicks(n)) * 10000) / 10000
+                  return nStart < newEnd - 0.0001 && nEnd > positionTick + 0.0001
+                })
+                if (!pHasOverlap) {
+                  updated = updated.map((n, i) =>
+                    i === pIdx ? { ...pNote, dotted: willBeDotted || undefined } : n
+                  )
+                  if (newTicks < oldTicks) {
+                    const pRests = decomposeRestTicks(newEnd, oldTicks - newTicks, pVoice, pStemDir)
+                    updated = [...updated, ...pRests]
+                      .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+                  } else if (newTicks > oldTicks) {
+                    updated = updated.filter(n => {
+                      if (!n.deletionRest || n.stemDir !== pStemDir) return true
+                      const rs = n.positionTick ?? 0
+                      const re = Math.round((rs + noteTicks(n)) * 10000) / 10000
+                      return !(rs < newEnd - 0.0001 && re > oldEnd - 0.0001)
+                    })
+                  }
+                }
+              }
             }
           }
-          return updated
+
+          const merged = mergeAdjacentVoiceRests(updated)
+          return prev.map((m, mi) => mi !== mIdx ? m : { ...m, [clef]: merged })
         }
       }
       return prev
@@ -941,11 +1066,43 @@ export default function Home() {
         if (note.isRest || note.isTripletPlaceholder) return
         const newTieAfter = !(note.tieAfter ?? false)
         if (newTieAfter) {
-          const sameM    = measures[mIdx][clef]
-          const nextM    = measures[mIdx + 1]?.[clef] ?? []
-          const inSame   = noteIdx + 1 < sameM.length
-          const nextNote = inSame ? sameM[noteIdx + 1] : nextM[0]
-          const nextPrev = inSame ? sameM.slice(0, noteIdx + 1) : []
+          const sameM = measures[mIdx][clef]
+          let nextNote, nextPrev
+
+          if (mode === 'check' && note.positionTick != null) {
+            // Check mode: voice-aware search by positionTick, ignoring other voice and deletion-rests
+            const endTick = Math.round((note.positionTick + noteTicks(note)) * 10000) / 10000
+            const sameCandidates = sameM
+              .filter(n =>
+                !n.isRest && !n.isTripletPlaceholder &&
+                n.stemDir === note.stemDir &&
+                n.positionTick != null &&
+                n.positionTick >= endTick - 0.0001 &&
+                n.id !== note.id
+              )
+              .sort((a, b) => a.positionTick - b.positionTick)
+
+            if (sameCandidates.length > 0) {
+              nextNote = sameCandidates[0]
+              nextPrev = sameM.slice(0, sameM.indexOf(nextNote))
+            } else {
+              nextNote = null; nextPrev = []
+              for (let mi = mIdx + 1; mi < measures.length; mi++) {
+                const mc = measures[mi][clef]
+                const cx = mc
+                  .filter(n => !n.isRest && !n.isTripletPlaceholder && n.stemDir === note.stemDir)
+                  .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+                if (cx.length > 0) { nextNote = cx[0]; break }
+              }
+            }
+          } else {
+            // Harmonize mode: sequential array index
+            const nextM  = measures[mIdx + 1]?.[clef] ?? []
+            const inSame = noteIdx + 1 < sameM.length
+            nextNote = inSame ? sameM[noteIdx + 1] : nextM[0]
+            nextPrev = inSame ? sameM.slice(0, noteIdx + 1) : []
+          }
+
           if (
             !nextNote || nextNote.isRest ||
             getEffectiveSemitones(note, sameM.slice(0, noteIdx), keyAcc) !==
@@ -968,10 +1125,42 @@ export default function Home() {
               if (pNote.isRest || pNote.isTripletPlaceholder) break
               // Validate tie for partner: next note in partner's voice must be same pitch
               const partnerSameM = updated[pmi][clef]
-              const partnerNextM = updated[pmi + 1]?.[clef] ?? []
-              const pInSame      = pIdx + 1 < partnerSameM.length
-              const pNext        = pInSame ? partnerSameM[pIdx + 1] : partnerNextM[0]
-              const pNextPrev    = pInSame ? partnerSameM.slice(0, pIdx + 1) : []
+              let pNext, pNextPrev
+
+              if (mode === 'check' && pNote.positionTick != null) {
+                // Check mode: voice-aware search for partner's next note
+                const pEndTick = Math.round((pNote.positionTick + noteTicks(pNote)) * 10000) / 10000
+                const pSameCandidates = partnerSameM
+                  .filter(n =>
+                    !n.isRest && !n.isTripletPlaceholder &&
+                    n.stemDir === pNote.stemDir &&
+                    n.positionTick != null &&
+                    n.positionTick >= pEndTick - 0.0001 &&
+                    n.id !== pNote.id
+                  )
+                  .sort((a, b) => a.positionTick - b.positionTick)
+
+                if (pSameCandidates.length > 0) {
+                  pNext     = pSameCandidates[0]
+                  pNextPrev = partnerSameM.slice(0, partnerSameM.indexOf(pNext))
+                } else {
+                  pNext = null; pNextPrev = []
+                  for (let pmi2 = pmi + 1; pmi2 < updated.length; pmi2++) {
+                    const mc = updated[pmi2][clef]
+                    const cx = mc
+                      .filter(n => !n.isRest && !n.isTripletPlaceholder && n.stemDir === pNote.stemDir)
+                      .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+                    if (cx.length > 0) { pNext = cx[0]; break }
+                  }
+                }
+              } else {
+                // Harmonize mode: sequential array index for partner
+                const partnerNextM = updated[pmi + 1]?.[clef] ?? []
+                const pInSame      = pIdx + 1 < partnerSameM.length
+                pNext     = pInSame ? partnerSameM[pIdx + 1] : partnerNextM[0]
+                pNextPrev = pInSame ? partnerSameM.slice(0, pIdx + 1) : []
+              }
+
               if (newTieAfter && (!pNext || pNext.isRest ||
                 getEffectiveSemitones(pNote, partnerSameM.slice(0, pIdx), keyAcc) !==
                 getEffectiveSemitones(pNext, pNextPrev, keyAcc))) break
@@ -1066,8 +1255,10 @@ export default function Home() {
     setSelectedNoteId(null)
     setHarmonizeVariants([])
     setHarmonizeError(null)
+    setUiState('editing')
     setPendingTriplet(null)
     savedCheckMeasuresRef.current = null
+    if (parseInt(ts.split('/')[1], 10) === 8) setIsTriplet(false)
 
     setMeasures(prev => {
       const newCap    = measureCapacity(ts)
@@ -1243,14 +1434,16 @@ export default function Home() {
   }
 
   function addNoteByDrop({ measureIdx, clef, pitch, octave, targetTick, previewVoice }) {
-    // In Check mode all drops go through the time-position path
-    if (mode === 'check' && targetTick != null) {
-      addNoteToCheckPosition(measureIdx, clef, pitch, octave, targetTick, previewVoice)
-      return
-    }
     if (!drag) return
     const { duration, isRest: dropRest, dotted: dropDotted } = drag
     const effectiveDotted = duration === '16' ? false : dropDotted
+
+    // In Check mode, non-triplet drops go through the time-position path.
+    // Triplet notes bypass this so the triplet branch below handles them.
+    if (mode === 'check' && targetTick != null && !(isTriplet && !dropRest)) {
+      addNoteToCheckPosition(measureIdx, clef, pitch, octave, targetTick, previewVoice)
+      return
+    }
 
     // ── Triplet path ─────────────────────────────────────────────
     if (isTriplet && !dropRest) {
@@ -1261,10 +1454,17 @@ export default function Home() {
         if (durTicks < refTicks || durTicks % refTicks !== 0) return
         const firstUnits = durTicks / refTicks
         if (firstUnits > 3) return
-        const notesList = measures[measureIdx]?.[clef]
-        if (!notesList) return
         const cap = getMeasureCap(measureIdx, measures.length)
-        if (!canAddTriplet(notesList, referenceN, cap)) return
+
+        if (mode === 'check') {
+          // Per-voice check: the full group span [targetTick, targetTick + refTicks×2) must fit in the measure
+          if (targetTick == null) return
+          if (Math.round((targetTick + refTicks * 2) * 10000) / 10000 > cap + 0.0001) return
+        } else {
+          const notesList = measures[measureIdx]?.[clef]
+          if (!notesList) return
+          if (!canAddTriplet(notesList, referenceN, cap)) return
+        }
 
         // All guards passed — push undo before mutating
         pushUndo()
@@ -1272,17 +1472,62 @@ export default function Home() {
         const groupId        = nextGroupIdRef.current++
         const remainingUnits = 3 - firstUnits
         const t = Date.now()
-        const newNote = {
-          pitch, octave, duration,
-          accidental: accidental || undefined,
-          triplet: true, tripletGroup: groupId, tripletRef: referenceN, id: t,
+
+        if (mode === 'check') {
+          const upperVoice = clef === 'treble' ? 'soprano' : 'tenor'
+          const lowerVoice = clef === 'treble' ? 'alto'    : 'bass'
+          const voiceName  = previewVoice === lowerVoice ? lowerVoice : upperVoice
+          const stemDirVal = voiceName === upperVoice ? 1 : -1
+          // Actual ticks per note: triplet duration = (base × 2) / 3
+          const firstTicks = Math.round(((durTicks * 2) / 3) * 10000) / 10000
+          const phTicks    = Math.round(((refTicks * 2) / 3) * 10000) / 10000
+          const spanEnd    = Math.round((targetTick + refTicks * 2) * 10000) / 10000
+
+          const newNote = {
+            pitch, octave, duration,
+            accidental: accidental || undefined,
+            triplet: true, tripletGroup: groupId, tripletRef: referenceN, id: t,
+            voice: voiceName, stemDir: stemDirVal,
+            positionTick: Math.round(targetTick * 10000) / 10000,
+          }
+          const checkPlaceholders = Array.from({ length: remainingUnits }, (_, i) => ({
+            pitch: 'b', octave: 4, duration: referenceN,
+            isRest: true, triplet: true, tripletGroup: groupId, tripletRef: referenceN,
+            isTripletPlaceholder: true, id: t + 1 + i,
+            voice: voiceName, stemDir: stemDirVal,
+            positionTick: Math.round((targetTick + firstTicks + i * phTicks) * 10000) / 10000,
+          }))
+
+          setMeasures(prev => prev.map((m, mi) => {
+            if (mi !== measureIdx) return m
+            // Remove deletion-rests of this voice that overlap the triplet's span
+            const cleaned = m[clef].filter(n => {
+              if (!n.deletionRest || n.stemDir !== stemDirVal) return true
+              const rs = n.positionTick ?? 0
+              const re = Math.round((rs + noteTicks(n)) * 10000) / 10000
+              return re <= targetTick + 0.0001 || rs >= spanEnd - 0.0001
+            })
+            return {
+              ...m,
+              [clef]: [...cleaned, newNote, ...checkPlaceholders]
+                .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0)),
+            }
+          }))
+          setPendingTriplet({ groupId, clef, measureIdx, referenceN, remainingUnits,
+            voice: voiceName, stemDir: stemDirVal })
+        } else {
+          const newNote = {
+            pitch, octave, duration,
+            accidental: accidental || undefined,
+            triplet: true, tripletGroup: groupId, tripletRef: referenceN, id: t,
+          }
+          const placeholders = makePlaceholders(groupId, referenceN, remainingUnits, t + 1)
+          setMeasures(prev => prev.map((m, mi) =>
+            mi !== measureIdx ? m
+            : { ...m, [clef]: [...m[clef], newNote, ...placeholders] }
+          ))
+          setPendingTriplet({ groupId, clef, measureIdx, referenceN, remainingUnits })
         }
-        const placeholders = makePlaceholders(groupId, referenceN, remainingUnits, t + 1)
-        setMeasures(prev => prev.map((m, mi) =>
-          mi !== measureIdx ? m
-          : { ...m, [clef]: [...m[clef], newNote, ...placeholders] }
-        ))
-        setPendingTriplet({ groupId, clef, measureIdx, referenceN, remainingUnits })
         setSelectedStaff(clef)
 
       } else {
@@ -1296,26 +1541,56 @@ export default function Home() {
         if (noteUnits > pt.remainingUnits) return
 
         const t = Date.now()
-        const newNote = {
-          pitch, octave, duration,
-          accidental: accidental || undefined,
-          triplet: true, tripletGroup: pt.groupId, tripletRef: pt.referenceN, id: t,
-        }
-        setMeasures(prev => prev.map((m, mi) => {
-          if (mi !== pt.measureIdx) return m
-          let consumed = 0
-          let inserted = false
-          const result = []
-          for (const n of m[pt.clef]) {
-            if (n.tripletGroup === pt.groupId && n.isTripletPlaceholder && consumed < noteUnits) {
-              if (!inserted) { result.push(newNote); inserted = true }
-              consumed++
-            } else {
-              result.push(n)
+
+        if (mode === 'check') {
+          // Get positionTick from the first placeholder being consumed; voice/stemDir come from the group
+          setMeasures(prev => prev.map((m, mi) => {
+            if (mi !== pt.measureIdx) return m
+            let consumed = 0
+            let inserted = false
+            let phTick = null
+            const result = []
+            for (const n of m[pt.clef]) {
+              if (n.tripletGroup === pt.groupId && n.isTripletPlaceholder && consumed < noteUnits) {
+                if (!inserted) {
+                  phTick = n.positionTick
+                  result.push({
+                    pitch, octave, duration,
+                    accidental: accidental || undefined,
+                    triplet: true, tripletGroup: pt.groupId, tripletRef: pt.referenceN, id: t,
+                    voice: pt.voice, stemDir: pt.stemDir, positionTick: phTick,
+                  })
+                  inserted = true
+                }
+                consumed++
+              } else {
+                result.push(n)
+              }
             }
+            return { ...m, [pt.clef]: result }
+          }))
+        } else {
+          const newNote = {
+            pitch, octave, duration,
+            accidental: accidental || undefined,
+            triplet: true, tripletGroup: pt.groupId, tripletRef: pt.referenceN, id: t,
           }
-          return { ...m, [pt.clef]: result }
-        }))
+          setMeasures(prev => prev.map((m, mi) => {
+            if (mi !== pt.measureIdx) return m
+            let consumed = 0
+            let inserted = false
+            const result = []
+            for (const n of m[pt.clef]) {
+              if (n.tripletGroup === pt.groupId && n.isTripletPlaceholder && consumed < noteUnits) {
+                if (!inserted) { result.push(newNote); inserted = true }
+                consumed++
+              } else {
+                result.push(n)
+              }
+            }
+            return { ...m, [pt.clef]: result }
+          }))
+        }
 
         const newRemaining = pt.remainingUnits - noteUnits
         setPendingTriplet(newRemaining === 0 ? null : { ...pt, remainingUnits: newRemaining })
@@ -1347,9 +1622,13 @@ export default function Home() {
   }
 
   function addMeasure() {
-    if (measures.length >= MAX_MEASURES) return
+    const maxLen = MAX_MEASURES + (hasAnacrusis ? 1 : 0)
+    if (measures.length >= maxLen) return
     pushUndo()
-    setMeasures(prev => prev.length >= MAX_MEASURES ? prev : [...prev, EMPTY_MEASURE()])
+    setMeasures(prev => {
+      const ml = MAX_MEASURES + (hasAnacrusis ? 1 : 0)
+      return prev.length >= ml ? prev : [...prev, EMPTY_MEASURE()]
+    })
   }
 
   function removeMeasure() {
@@ -1367,7 +1646,7 @@ export default function Home() {
     // displayedN is the count excluding the pickup measure.
     // Convert to actual array length before comparing/adding.
     const offset = hasAnacrusis ? 1 : 0
-    const target = Math.min(MAX_MEASURES, Math.max(offset + 1, displayedN + offset))
+    const target = Math.min(MAX_MEASURES + offset, Math.max(offset + 1, displayedN + offset))
     if (target === measures.length) return
     pushUndo()
     setMeasures(prev => {
@@ -1385,6 +1664,7 @@ export default function Home() {
     setMeasures(hasAnacrusis ? [PICKUP_MEASURE(), EMPTY_MEASURE()] : [EMPTY_MEASURE()])
     setHarmonizeVariants([])
     setHarmonizeError(null)
+    setUiState('editing')
     savedCheckMeasuresRef.current = null
   }
 
@@ -1392,21 +1672,60 @@ export default function Home() {
     downloadScoreJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
   }
 
+  async function handleDownloadPng() {
+    const svg = resultStaffRef.current?.querySelector('svg')
+    const now = new Date()
+    const dd   = String(now.getDate()).padStart(2, '0')
+    const mm   = String(now.getMonth() + 1).padStart(2, '0')
+    const yy   = String(now.getFullYear()).slice(-2)
+    const hh   = String(now.getHours()).padStart(2, '0')
+    const min  = String(now.getMinutes()).padStart(2, '0')
+    const ss   = String(now.getSeconds()).padStart(2, '0')
+    const filename = `harm_var_${selectedVariantIdx + 1}_${dd}${mm}${yy}_${hh}${min}${ss}.png`
+    setDlDropdownOpen(false)
+    await exportSvgToPng(svg, filename)
+  }
+
   // ── Harmonization ────────────────────────────────────────────────
   async function requestHarmonize() {
-    setIsHarmonizing(true)
+    setUiState('harmonizingLoading')
     setHarmonizeError(null)
     try {
       const scoreJson = scoreToJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
       const variants  = await harmonizeScore(scoreJson)
       setHarmonizeVariants(variants)
       setSelectedVariantIdx(0)
+      setUiState('harmonizationResults')
     } catch (err) {
       setHarmonizeError(err.message)
       setHarmonizeVariants([])
-    } finally {
-      setIsHarmonizing(false)
+      setUiState('editing')
     }
+  }
+
+  function goBackFromResults() {
+    setUiState('editing')
+    setHarmonizeVariants([])
+    setHarmonizeError(null)
+    setSelectedVariantIdx(0)
+  }
+
+  function selectVariantAndEdit() {
+    const variant = harmonizeVariants[selectedVariantIdx]
+    if (!variant) return
+    const annotated = variant.measures.map(m => ({
+      ...m,
+      treble: annotateForCheck(m.treble, 'soprano',  1),
+      bass:   annotateForCheck(m.bass,   'bass',    -1),
+    }))
+    pushUndo()
+    setMeasures(annotated)
+    savedCheckMeasuresRef.current = null
+    setHarmonizeVariants([])
+    setHarmonizeError(null)
+    setSelectedVariantIdx(0)
+    setUiState('editing')
+    setMode('check')
   }
 
   function toggleMode(id) {
@@ -1482,6 +1801,7 @@ export default function Home() {
         })))
       }
     }
+    setUiState('editing')
     setMode('check')
   }
 
@@ -1504,6 +1824,7 @@ export default function Home() {
         }
       }))
     }
+    setUiState('editing')
     setMode('harmonize')
   }
 
@@ -1522,164 +1843,236 @@ export default function Home() {
   }
 
   // ── Derived state for toolbar ────────────────────────────────────
+  const isHarmonizing = uiState === 'harmonizingLoading'
   const canUndo      = pendingTriplet !== null || undoStack.length > 0
   const canRemove    = measures.length > (hasAnacrusis ? 2 : 1)
-  const canAddMeasure = measures.length < MAX_MEASURES
+  const canAddMeasure = measures.length < MAX_MEASURES + (hasAnacrusis ? 1 : 0)
 
   return (
     <div className="app">
       <div className="workspace">
         <div className="workspace-toolbar">
-          <div className="mode-bar">
-            <button
-              className={`mode-tab${mode === 'harmonize' ? ' mode-active' : ''}`}
-              onClick={switchToHarmonize}
-            >ГАРМОНІЗУВАТИ</button>
-            <button
-              className={`mode-tab${mode === 'check' ? ' mode-active' : ''}`}
-              onClick={switchToCheck}
-            >ПЕРЕВІРИТИ</button>
-          </div>
-
-        <NoteToolbar
-        durations={DURATIONS}
-        timeSigs={TIME_SIGNATURES}
-        selected={selectedNote}
-        timeSignature={timeSignature}
-        isRest={isRest}
-        onSelectTimeSig={changeTimeSig}
-        onStartDrag={startDrag}
-        onUndo={undo}
-        hasSelectedNote={isEditMode && !!selectedNoteId}
-        onClear={() => isEditMode && selectedNoteId ? deleteSelectedNote() : clearAll()}
-        tonality={tonality}
-        onSelectTonality={setTonality}
-        accidental={accidental}
-        onSelectAccidental={(a) => isEditMode && selectedNoteId
-          ? editSelectedNoteAccidental(a)
-          : setAccidental(prev => prev === a ? null : a)}
-        isDotted={isDotted}
-        onToggleDot={() => isEditMode && selectedNoteId ? editSelectedNoteDot() : setIsDotted(p => !p)}
-        isTie={isTie}
-        onToggleTie={() => isEditMode && selectedNoteId ? editSelectedNoteTie() : setIsTie(p => !p)}
-        isTriplet={isTriplet}
-        tripletCount={tripletCount}
-        onToggleTriplet={() => isEditMode && selectedNoteId ? editSelectedNoteTriplet() : handleToggleTriplet()}
-        anacrusis={anacrusis}
-        anacruisTicks={anacruisTicks}
-        maxAnacruisTicks={maxAnacruisTicks}
-        onChangeAnacrusis={handleChangeAnacrusis}
-        onAddMeasure={addMeasure}
-        onRemoveMeasure={removeMeasure}
-        canUndo={canUndo}
-        canRemoveMeasure={canRemove}
-        isHarmonize={mode === 'harmonize'}
-        clefMode={clefMode}
-        onSelectClef={handleSelectClef}
-        isEditMode={isEditMode}
-        onToggleEditMode={handleToggleEditMode}
-
-        selectedModes={selectedModes}
-        onToggleMode={toggleMode}
-        onHarmonize={requestHarmonize}
-        isHarmonizing={isHarmonizing}
-        isCheck={mode === 'check'}
-        onCheck={requestCheck}
-        isChecking={isChecking}
-        forbiddenRules={FORBIDDEN_RULES}
-        selectedForbiddenRules={selectedForbiddenRules}
-        onToggleForbiddenRule={toggleForbiddenRule}
-        allowedChords={ALLOWED_CHORDS}
-        selectedAllowedChords={selectedAllowedChords}
-        onToggleAllowedChord={toggleAllowedChord}
-        measuresCount={measures.length - (hasAnacrusis ? 1 : 0)}
-        canAddMeasure={canAddMeasure}
-        onSetMeasureCount={handleSetMeasureCount}
-      />
-        </div>
-
-      <Staff
-        measures={measures}
-        timeSignature={timeSignature}
-        keySignature={tonality.vexKey}
-        drag={drag}
-        onDrop={addNoteByDrop}
-        anacruisTicks={anacruisTicks}
-        selectedNoteId={selectedNoteId}
-        onSelectNote={setSelectedNoteId}
-        onSetNotePitch={setNotePitch}
-        onNoteDragStart={pushUndo}
-        showBass={mode === 'check'}
-        singleClef={clefMode}
-        isTriplet={isTriplet}
-        tripletCount={tripletCount}
-        pendingTriplet={pendingTriplet}
-        isCheckMode={mode === 'check'}
-      />
-      </div>
-
-      {isHarmonizing && (
-        <div className="harmonize-loading">
-          <span className="harmonize-spinner" />
-          Гармонізую мелодію…
-        </div>
-      )}
-
-      {harmonizeError && (
-        <div className="harmonize-error">
-          Помилка: {harmonizeError}
-        </div>
-      )}
-
-      {harmonizeVariants.length > 0 && (() => {
-        const variant = harmonizeVariants[selectedVariantIdx]
-        return (
-          <section className="harmonize-results">
-            <h2 className="harmonize-results-title">Варіанти гармонізації</h2>
-
-            <div className="variant-tabs">
-              {harmonizeVariants.map((v, i) => (
-                <button
-                  key={v.id}
-                  className={`variant-tab${i === selectedVariantIdx ? ' active' : ''}`}
-                  onClick={() => setSelectedVariantIdx(i)}
-                >
-                  {v.name}
-                </button>
-              ))}
+          {uiState === 'harmonizationResults' ? (
+            <div className="mode-bar mode-bar--results">
+              <span className="results-heading">Результати гармонізації</span>
             </div>
+          ) : (
+            <div className="mode-bar">
+              <button
+                className={`mode-tab${mode === 'harmonize' ? ' mode-active' : ''}`}
+                onClick={switchToHarmonize}
+              >ГАРМОНІЗУВАТИ</button>
+              <button
+                className={`mode-tab${mode === 'check' ? ' mode-active' : ''}`}
+                onClick={switchToCheck}
+              >ПЕРЕВІРИТИ</button>
+            </div>
+          )}
 
-            <div className="variant-card">
-              <div className="variant-header">
-                <div className="variant-meta">
-                  <span className="variant-name">{variant.name}</span>
-                  <span className="variant-desc">{variant.description}</span>
-                </div>
-                <a
-                  className="btn-action btn-download"
-                  href={variant.downloadUrl}
-                  download={variant.filename}
-                >
-                  Завантажити MusicXML
-                </a>
+          {uiState === 'editing' && (
+            <NoteToolbar
+              durations={DURATIONS}
+              timeSigs={TIME_SIGNATURES}
+              selected={selectedNote}
+              timeSignature={timeSignature}
+              isRest={isRest}
+              onSelectTimeSig={changeTimeSig}
+              onStartDrag={startDrag}
+              onUndo={undo}
+              hasSelectedNote={isEditMode && !!selectedNoteId}
+              onClear={() => isEditMode && selectedNoteId ? deleteSelectedNote() : clearAll()}
+              tonality={tonality}
+              onSelectTonality={setTonality}
+              accidental={accidental}
+              onSelectAccidental={(a) => isEditMode && selectedNoteId
+                ? editSelectedNoteAccidental(a)
+                : setAccidental(prev => prev === a ? null : a)}
+              isDotted={isDotted}
+              onToggleDot={() => isEditMode && selectedNoteId ? editSelectedNoteDot() : setIsDotted(p => !p)}
+              isTie={isTie}
+              onToggleTie={() => isEditMode && selectedNoteId ? editSelectedNoteTie() : setIsTie(p => !p)}
+              isTriplet={isTriplet}
+              tripletCount={tripletCount}
+              onToggleTriplet={() => isEditMode && selectedNoteId ? editSelectedNoteTriplet() : handleToggleTriplet()}
+              anacrusis={anacrusis}
+              anacruisTicks={anacruisTicks}
+              maxAnacruisTicks={maxAnacruisTicks}
+              onChangeAnacrusis={handleChangeAnacrusis}
+              onAddMeasure={addMeasure}
+              onRemoveMeasure={removeMeasure}
+              canUndo={canUndo}
+              canRemoveMeasure={canRemove}
+              isHarmonize={mode === 'harmonize'}
+              clefMode={clefMode}
+              onSelectClef={handleSelectClef}
+              isEditMode={isEditMode}
+              onToggleEditMode={handleToggleEditMode}
+              selectedModes={selectedModes}
+              onToggleMode={toggleMode}
+              onHarmonize={requestHarmonize}
+              isHarmonizing={isHarmonizing}
+              isCheck={mode === 'check'}
+              onCheck={requestCheck}
+              isChecking={isChecking}
+              forbiddenRules={FORBIDDEN_RULES}
+              selectedForbiddenRules={selectedForbiddenRules}
+              onToggleForbiddenRule={toggleForbiddenRule}
+              allowedChords={ALLOWED_CHORDS}
+              selectedAllowedChords={selectedAllowedChords}
+              onToggleAllowedChord={toggleAllowedChord}
+              measuresCount={measures.length - (hasAnacrusis ? 1 : 0)}
+              canAddMeasure={canAddMeasure}
+              onSetMeasureCount={handleSetMeasureCount}
+              playbackState={playbackState}
+              onPlay={handlePlay}
+              onPause={handlePause}
+              onStop={handleStop}
+              playbackSpeedMode={playbackSpeedMode}
+              onSetSpeedMode={setPlaybackSpeedMode}
+            />
+          )}
+
+          {uiState === 'harmonizationResults' && harmonizeVariants.length > 0 && (
+            <div className="results-toolbar">
+
+              {/* Колонка 1 — Назад */}
+              <div className="results-col results-col--left">
+                <button className="btn-back-results" onClick={goBackFromResults} title="Назад">
+                  <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 5L7 10l5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
               </div>
 
-              <Staff
-                measures={variant.measures}
-                timeSignature={timeSignature}
-                keySignature={tonality.vexKey}
-                drag={null}
-                onDrop={() => {}}
-                anacruisTicks={anacruisTicks}
-                selectedNoteId={null}
-                onSelectNote={() => {}}
-                onSetNotePitch={() => {}}
-                showBass={true}
-              />
+              {/* Колонка 2 — Варіанти */}
+              <div className="results-col results-col--center">
+                {harmonizeVariants.map((v, i) => (
+                  <button
+                    key={v.id}
+                    className={`variant-tab${i === selectedVariantIdx ? ' active' : ''}`}
+                    onClick={() => setSelectedVariantIdx(i)}
+                  >
+                    {i + 1}
+                  </button>
+                ))}
+              </div>
+
+              {/* Колонка 3 — Дії + Playback */}
+              <div className="results-col results-col--right">
+                <button className="btn-result-action btn-select" onClick={selectVariantAndEdit}>
+                  Обрати і змінити
+                </button>
+                <div className="dl-dropdown-wrap" ref={dlDropdownRef}>
+                  <button
+                    className={`btn-result-action btn-download${dlDropdownOpen ? ' open' : ''}`}
+                    onClick={() => setDlDropdownOpen(o => !o)}
+                  >
+                    <svg className="icon-download" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M8 1v9M4 7l4 4 4-4M2 14h12" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    Завантажити
+                    <svg className="icon-caret" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </button>
+                  {dlDropdownOpen && (
+                    <div className="dl-dropdown-menu">
+                      <button className="dl-menu-item" onClick={handleDownloadPng}>
+                        PNG
+                      </button>
+                      <button className="dl-menu-item" onClick={() => { window.open(harmonizeVariants[selectedVariantIdx]?.downloadUrl); setDlDropdownOpen(false) }}>
+                        MusicXML
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className="toolbar-ctrl-buttons">
+                  <button
+                    className={`btn-ctrl btn-ctrl-speed${playbackSpeedMode === 'slow' ? ' active' : ''}`}
+                    onClick={() => setPlaybackSpeedMode('slow')}
+                    title={`Повільний темп (${getPlaybackBpm(timeSignature, 'slow')} BPM)`}
+                  >slow</button>
+                  <button
+                    className={`btn-ctrl btn-ctrl-speed${playbackSpeedMode === 'fast' ? ' active' : ''}`}
+                    onClick={() => setPlaybackSpeedMode('fast')}
+                    title={`Швидкий темп (${getPlaybackBpm(timeSignature, 'fast')} BPM)`}
+                  >fast</button>
+                  <button
+                    className={`btn-ctrl btn-ctrl-play${playbackState === 'playing' ? ' playing' : ''}`}
+                    onClick={handlePlay}
+                    disabled={playbackState === 'playing'}
+                    title={playbackState === 'paused' ? 'Продовжити' : 'Відтворити'}
+                  >▶</button>
+                  <button
+                    className="btn-ctrl btn-ctrl-pause"
+                    onClick={handlePause}
+                    disabled={playbackState !== 'playing'}
+                    title="Пауза"
+                  >⏸</button>
+                  <button
+                    className="btn-ctrl btn-ctrl-stop"
+                    onClick={handleStop}
+                    disabled={playbackState === 'idle'}
+                    title="Зупинити"
+                  >⏹</button>
+                </div>
+              </div>
+
             </div>
-          </section>
-        )
-      })()}
+          )}
+        </div>
+
+        {uiState === 'editing' && (
+          <Staff
+            measures={measures}
+            timeSignature={timeSignature}
+            keySignature={tonality.vexKey}
+            drag={drag}
+            onDrop={addNoteByDrop}
+            anacruisTicks={anacruisTicks}
+            selectedNoteId={selectedNoteId}
+            onSelectNote={setSelectedNoteId}
+            onSetNotePitch={setNotePitch}
+            onNoteDragStart={pushUndo}
+            showBass={mode === 'check'}
+            singleClef={clefMode}
+            isTriplet={isTriplet}
+            tripletCount={tripletCount}
+            pendingTriplet={pendingTriplet}
+            isCheckMode={mode === 'check'}
+            currentTick={currentTick}
+            totalTicks={totalTicks}
+            playbackState={playbackState}
+          />
+        )}
+
+        {uiState === 'harmonizingLoading' && (
+          <div className="harmonize-loading">
+            <span className="harmonize-spinner" />
+            Гармонізую мелодію…
+          </div>
+        )}
+
+        {uiState === 'harmonizationResults' && harmonizeVariants[selectedVariantIdx] && (
+          <div ref={resultStaffRef} style={{ display: 'contents' }}>
+            <Staff
+              measures={harmonizeVariants[selectedVariantIdx].measures}
+              timeSignature={timeSignature}
+              keySignature={tonality.vexKey}
+              drag={null}
+              onDrop={() => {}}
+              anacruisTicks={anacruisTicks}
+              selectedNoteId={null}
+              onSelectNote={() => {}}
+              onSetNotePitch={() => {}}
+              showBass={true}
+              currentTick={currentTick}
+              totalTicks={totalTicks}
+              playbackState={playbackState}
+            />
+          </div>
+        )}
+      </div>
     </div>
   )
 }
