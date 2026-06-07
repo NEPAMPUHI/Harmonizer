@@ -114,3 +114,14 @@ export async function exportMusicxml(scoreJson) {
   const data = await post('/api/score/musicxml', scoreJson)
   return `${API_BASE}${data.download_url}`
 }
+
+/**
+ * Submit a worker-format request to the backend and return the echoed payload.
+ * The backend logs and returns the JSON unchanged — this is a temporary stub
+ * until the C++ engine endpoint is wired up.
+ *
+ * @param {object} workerRequest — built by buildWorkerRequest() in workerRequest.js
+ */
+export async function submitWorkerJob(workerRequest) {
+  return post('/api/worker/submit', workerRequest)
+}

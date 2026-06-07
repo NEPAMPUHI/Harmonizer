@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from models import ScorePayload
+from worker_models import WorkerRequest
+from worker_service import call_worker
 from xml_builder import build_musicxml
 from harmonize import generate_variants
 
@@ -132,6 +135,27 @@ async def harmonize_score(payload: ScorePayload) -> dict:
 
     logger.info('Harmonized: %d variants, %d measures', len(variants), len(payload.measures))
     return {'variants': variants}
+
+
+@app.post('/api/worker/submit', status_code=200, tags=['worker'])
+async def submit_worker_job(payload: WorkerRequest) -> dict:
+    """
+    Accept a worker-format request from the frontend, forward it to the
+    C++ harmonisation engine via subprocess, and return the engine's response.
+
+    The payload is validated by Pydantic then serialised verbatim (camelCase)
+    and piped to harmonizer_worker.exe stdin. The worker's stdout (one JSON
+    line) is parsed and returned to the caller.
+    """
+    logger.info('Worker job received  jobId=%s  mode=%s', payload.jobId, payload.mode)
+
+    # Exclude None fields so optional settings (e.g. scaleMode for check_solution)
+    # are not serialised as JSON null, which would confuse the C++ parser.
+    raw = payload.model_dump(exclude_none=True)
+
+    # call_worker blocks on subprocess I/O — run it in a thread so we don't
+    # stall the async event loop during processing.
+    return await asyncio.to_thread(call_worker, raw)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

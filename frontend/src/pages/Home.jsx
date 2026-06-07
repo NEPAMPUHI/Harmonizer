@@ -5,7 +5,8 @@ import { canAdd, canAddTriplet, measureCapacity, noteTicks, usedTicks, NOTE_TICK
 import { DEFAULT_TONALITY } from '../tonalities'
 import { getKeyAccidentals, getEffectiveSemitones } from '../pitchUtils'
 import { downloadScoreJson, scoreToJson } from '../scoreToJson'
-import { harmonizeScore } from '../api'
+import { harmonizeScore, submitWorkerJob } from '../api'
+import { buildWorkerRequest } from '../workerRequest'
 import { usePlayback, getPlaybackBpm } from '../usePlayback'
 import { exportSvgToPng } from '../exportPng'
 
@@ -1691,8 +1692,15 @@ export default function Home() {
     setUiState('harmonizingLoading')
     setHarmonizeError(null)
     try {
-      const scoreJson = scoreToJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
-      const variants  = await harmonizeScore(scoreJson)
+      const scoreJson  = scoreToJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
+      const workerReq  = buildWorkerRequest('harmonize_melody', {
+        measures, timeSignature, tonality, anacruisTicks,
+        selectedModes, selectedForbiddenRules, selectedAllowedChords,
+      })
+      const [variants] = await Promise.all([
+        harmonizeScore(scoreJson),
+        submitWorkerJob(workerReq).catch(err => console.warn('[worker] submit failed:', err)),
+      ])
       setHarmonizeVariants(variants)
       setSelectedVariantIdx(0)
       setUiState('harmonizationResults')
@@ -1746,8 +1754,17 @@ export default function Home() {
 
   async function requestCheck() {
     setIsChecking(true)
-    // TODO: implement check logic
-    setIsChecking(false)
+    try {
+      const workerReq = buildWorkerRequest('check_solution', {
+        measures, timeSignature, tonality, anacruisTicks,
+        selectedModes, selectedForbiddenRules, selectedAllowedChords,
+      })
+      await submitWorkerJob(workerReq)
+    } catch (err) {
+      console.error('[worker] check failed:', err)
+    } finally {
+      setIsChecking(false)
+    }
   }
 
   function toggleAllowedChord(id) {

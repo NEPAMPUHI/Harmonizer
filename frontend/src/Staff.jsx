@@ -927,6 +927,80 @@ export default function Staff({
               const shift = Math.floor(leftPad / 2)
               list.forEach(tick => map[tick].setX(map[tick].getX() - shift))
             }
+
+            // ── Beat equalization ──────────────────────────────────────────
+            // VexFlow Formatter distributes space by glyph complexity: a beat with
+            // 4 sixteenths gets more pixels than a beat with 1 quarter. The playback
+            // cursor moves linearly by tick, so this visual non-uniformity causes
+            // desync. Fix: rescale every beat to the same pixel width while keeping
+            // internal note proportions within each beat.
+            const [, beqSigD] = timeSignature.split('/').map(Number)
+            const beqBeatTicks = beqSigD === 4 ? 4 : 6
+            const beqNumBeats  = Math.round(mCap / beqBeatTicks)
+
+            if (list.length > 1 && beqNumBeats >= 2) {
+              // Build ourTick (sixteenth-note ticks) → TickContext, walking all voices.
+              const ourTickToTC = new Map()
+              const recordVoiceTicks = (noteArr, vexArr) => {
+                if (!noteArr || !vexArr) return
+                let cur = 0
+                for (let j = 0; j < noteArr.length; j++) {
+                  const rt = Math.round(cur * 10000) / 10000
+                  const tc = vexArr[j]?.tickContext
+                  if (tc && !ourTickToTC.has(rt)) ourTickToTC.set(rt, tc)
+                  cur = Math.round((cur + noteTicks(noteArr[j])) * 10000) / 10000
+                }
+              }
+              if (useCheckVoices) {
+                recordVoiceTicks(dSoprano, tv?.vexNotes)
+                recordVoiceTicks(dAlto,    tv2?.vexNotes)
+                recordVoiceTicks(dTenor,   bv?.vexNotes)
+                recordVoiceTicks(dBassV,   bv2?.vexNotes)
+              } else {
+                recordVoiceTicks(dTreble, tv?.vexNotes)
+                recordVoiceTicks(dBass,   bv?.vexNotes)
+              }
+
+              if (ourTickToTC.size > 0) {
+                // Natural start X per beat = leftmost TC X in that beat's tick range.
+                const beatNatStartX = new Array(beqNumBeats).fill(null)
+                for (const [tick, tc] of ourTickToTC) {
+                  const b = Math.min(beqNumBeats - 1, Math.floor(tick / beqBeatTicks + 1e-9))
+                  const x = tc.getX()
+                  if (beatNatStartX[b] === null || x < beatNatStartX[b]) beatNatStartX[b] = x
+                }
+
+                // Natural end X per beat = start of the next non-null beat, or availW.
+                const beatNatEndX = beatNatStartX.map((_, b) => {
+                  for (let nb = b + 1; nb < beqNumBeats; nb++) {
+                    if (beatNatStartX[nb] !== null) return beatNatStartX[nb]
+                  }
+                  return availW
+                })
+
+                // Natural width per beat; max sets the target equalized width.
+                const beatNatW = beatNatStartX.map((sx, b) =>
+                  sx !== null ? Math.max(1, beatNatEndX[b] - sx) : 0
+                )
+                const maxNatW  = Math.max(...beatNatW)
+                const anchorX  = beatNatStartX[0] ?? beatNatStartX.find(x => x !== null) ?? 0
+                // Cap so beats collectively never exceed the available note area.
+                const effectiveBeatW = Math.min(maxNatW, (availW - anchorX) / beqNumBeats)
+
+                if (effectiveBeatW > 0) {
+                  for (const [tick, tc] of ourTickToTC) {
+                    const b        = Math.min(beqNumBeats - 1, Math.floor(tick / beqBeatTicks + 1e-9))
+                    const natStart = beatNatStartX[b]
+                    const natW     = beatNatW[b]
+                    if (natStart === null || natW <= 0) continue
+                    // Linear rescale within beat: preserve internal spacing ratios.
+                    const posInBeat    = (tc.getX() - natStart) / natW
+                    const newBeatStart = anchorX + b * effectiveBeatW
+                    tc.setX(newBeatStart + posInBeat * effectiveBeatW)
+                  }
+                }
+              }
+            }
           }
         }
 
