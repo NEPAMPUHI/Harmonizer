@@ -1,13 +1,22 @@
 import { useState, useEffect, useRef } from 'react'
 
 const CHECK_ERROR_LABELS = {
-  AllVoicesSameDirection:   'всі голоси в одну сторону',
-  VoiceCrossing:            'перехрещення',
-  ParallelFifths:           'паралельні квінти',
-  ParallelOctaves:          'паралельні октави',
-  ParallelOctavesOrUnisons: 'паралельні октави або унісони',
-  HiddenFifths:             'приховані квінти між крайніми голосами',
-  HiddenOctaves:            'приховані октави між крайніми голосами',
+  UnknownChord:                       'невідомий акорд',
+  VoiceRangeViolation:                'голос виходить за допустимий діапазон',
+  MoreThanOctaveBetweenAdjacentVoices:'відстань між голосами більше октави',
+  AllVoicesSameDirection:             'всі голоси в одну сторону',
+  VoiceCrossing:                      'перехрещення',
+  ChromaticSemitoneTransfer:          'хроматична передача напівтону',
+  ParallelFifths:                     'паралельні квінти',
+  ParallelOctaves:                    'паралельні октави',
+  ParallelOctavesOrUnisons:           'паралельні октави або унісони',
+  HiddenFifths:                       'приховані квінти між крайніми голосами',
+  HiddenOctaves:                      'приховані октави між крайніми голосами',
+  AugmentedIntervalInBass:            'збільшений інтервал в басу',
+  VoiceLeapGreaterThanOctave:         'стрибок голосу більше допустимого',
+  ConsecutiveFourthsInBass:           '2 послідовні ходи по квартам в басу',
+  ConsecutiveFifthsInBass:            '2 послідовні ходи по квінтам в басу',
+  FunctionalProgressionError:         'порушення функціональної послідовності',
 }
 
 function getCheckErrorLabel(error) {

@@ -19,19 +19,26 @@ static Note restNote() {
 // Build an IdentifiedCheckChord with all 4 voices present and pitched.
 // isKnown=true → treated as a valid chord; isKnown=false → will trigger UnknownChord.
 //
-// When isKnown=true the ic.chord is set to a close-position T-1 triad whose
-// notes satisfy all SATB range and spacing constraints, so no additional
-// diagnostic errors fire for known chords.
+// Both cases use close-position C-major notes (S=C5 A=E4 T=C4 B=C3):
+//   - all voices in SATB range
+//   - no adjacent-voice gap > octave
+//   - consecutive identical positions produce no pairwise errors (no movement)
+// This ensures no spurious range/spacing/voice-leading errors beyond UnknownChord.
 static IdentifiedCheckChord makeIC(bool isKnown, int posIdx = 0) {
     IdentifiedCheckChord ic;
     auto& pos = ic.position;
     pos.measureIndex                = 1;
     pos.positionInMeasureSixteenths = posIdx * 4;
     pos.durationSixteenths          = 4;
-    pos.soprano = pitched(NoteName::C, 5); pos.hasSoprano = true;
-    pos.alto    = pitched(NoteName::G, 4); pos.hasAlto    = true;
-    pos.tenor   = pitched(NoteName::E, 3); pos.hasTenor   = true;
-    pos.bass    = pitched(NoteName::C, 3); pos.hasBass    = true;
+    // Close-position C-major: consistent notes in both position and chord
+    const Note sop = pitched(NoteName::C, 5);
+    const Note alt = pitched(NoteName::E, 4);
+    const Note ten = pitched(NoteName::C, 4);
+    const Note bas = pitched(NoteName::C, 3);
+    pos.soprano = sop; pos.hasSoprano = true;
+    pos.alto    = alt; pos.hasAlto    = true;
+    pos.tenor   = ten; pos.hasTenor   = true;
+    pos.bass    = bas; pos.hasBass    = true;
     ic.isKnownChord = isKnown;
 
     if (isKnown) {
@@ -42,12 +49,7 @@ static IdentifiedCheckChord makeIC(bool isKnown, int posIdx = 0) {
         tmpl.inversion          = Inversion::I;
         tmpl.position           = ChordPosition::Close;
         tmpl.degreesInSatbOrder = {1, 3, 5, 1};
-        // Close-position C-major: S=C5 A=E4 T=C4 B=C3 — all voices in range,
-        // no adjacent-voice gap > octave, no parallel or hidden intervals.
-        ic.chord           = Chord(pitched(NoteName::C, 5),
-                                   pitched(NoteName::E, 4),
-                                   pitched(NoteName::C, 4),
-                                   pitched(NoteName::C, 3), tmpl);
+        ic.chord           = Chord(sop, alt, ten, bas, tmpl);
         ic.matchedTemplate = tmpl;
     }
     return ic;

@@ -432,6 +432,36 @@ export default function Home() {
   const [isChecking,                 setIsChecking]                 = useState(false)
   const [checkErrors,                setCheckErrors]                = useState(null)  // null=not checked, []|[...]=result
   const [highlightedCheckErrorIndex, setHighlightedCheckErrorIndex] = useState(null)
+  const [dismissedCheckPositions,    setDismissedCheckPositions]    = useState(new Set())
+
+  // Adds the harmonic position key for note with given ID to the dismissed set.
+  // Must be called BEFORE the note is removed/mutated (measuresRef is still current).
+  function dismissCheckForNote(noteId) {
+    if (checkErrors === null || !noteId) return
+    const ms = measuresRef.current
+    for (let mi = 0; mi < ms.length; mi++) {
+      for (const clef of ['treble', 'bass']) {
+        const note = ms[mi]?.[clef]?.find(n => n.id === noteId)
+        if (note?.positionTick != null) {
+          const k = `${mi}:${note.positionTick}`
+          setDismissedCheckPositions(prev => {
+            if (prev.has(k)) return prev
+            const next = new Set(prev); next.add(k); return next
+          })
+          return
+        }
+      }
+    }
+  }
+
+  function dismissCheckForTick(mi, tick) {
+    if (checkErrors === null) return
+    const k = `${mi}:${tick}`
+    setDismissedCheckPositions(prev => {
+      if (prev.has(k)) return prev
+      const next = new Set(prev); next.add(k); return next
+    })
+  }
 
   // ── Scale modes (harmonize mode) ────────────────────────────────
   const [selectedModes, setSelectedModes] = useState(['natural', 'harmonic', 'melodic'])
@@ -824,6 +854,7 @@ export default function Home() {
   // ── Selected-note editing ────────────────────────────────────────
   function deleteSelectedNote() {
     if (!selectedNoteId) return
+    dismissCheckForNote(selectedNoteId)
     const result = computeDeleteResult(measuresRef.current, selectedNoteId, mode)
     if (!result) return
     pushUndo()
@@ -832,6 +863,7 @@ export default function Home() {
   }
 
   function editSelectedNoteDuration(newDuration) {
+    dismissCheckForNote(selectedNoteId)
     pushUndo()
     setMeasures(prev => {
       for (let mIdx = 0; mIdx < prev.length; mIdx++) {
@@ -905,6 +937,7 @@ export default function Home() {
   }
 
   function editSelectedNoteAccidental(accId) {
+    dismissCheckForNote(selectedNoteId)
     pushUndo()
     const partnerId = mode === 'check' ? findUnisonPartner(measuresRef.current, selectedNoteId) : null
     setMeasures(prev => {
@@ -943,6 +976,7 @@ export default function Home() {
   }
 
   function editSelectedNoteDot() {
+    dismissCheckForNote(selectedNoteId)
     pushUndo()
     const partnerId = mode === 'check' ? findUnisonPartner(measuresRef.current, selectedNoteId) : null
     setMeasures(prev => {
@@ -1803,6 +1837,7 @@ export default function Home() {
   async function requestCheck() {
     setIsChecking(true)
     setCheckErrors(null)
+    setDismissedCheckPositions(new Set())
     try {
       const workerReq = buildWorkerRequest('check_solution', {
         measures, timeSignature, tonality, anacruisTicks,

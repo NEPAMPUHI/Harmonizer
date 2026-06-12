@@ -155,24 +155,29 @@ TEST_CASE("AllVoicesSameDirection: 3 up 1 still → 0 errors", "[avsd]") {
         CHECK(e.code != CheckErrorCode::AllVoicesSameDirection);
 }
 
-// ── Test 5: unknown chord in pair → pair skipped, no AllVoicesSameDirection ───
+// ── Test 5: unknown chord in pair → pairwise check still runs ─────────────────
+//
+// After the fix, pairwise checks (including AllVoicesSameDirection) run even
+// when one chord in the pair is unknown. Both UnknownChord and
+// AllVoicesSameDirection must be present in the result.
 
-TEST_CASE("AllVoicesSameDirection: unknown chord skips pair", "[avsd]") {
+TEST_CASE("AllVoicesSameDirection: unknown chord does not skip pairwise check", "[avsd]") {
     CheckSolutionRuleChecker checker;
 
-    // ic2 is the same pitches as ic_hi but marked unknown.
+    // ic2 is the same pitches as ic_hi but marked unknown — all 4 voices ascend.
     const auto ic1 = ic_lo();
     const auto ic2 = avsd_unknownIC(avsd_pn(NoteName::G, 5), avsd_pn(NoteName::D, 5),
                                     avsd_pn(NoteName::B, 4), avsd_pn(NoteName::F, 4));
 
     const auto errors = checker.check({ic1, ic2});
 
-    // Only the UnknownChord diagnostic fires; no AllVoicesSameDirection.
-    REQUIRE(errors.size() == 1);
-    CHECK(errors[0].code == CheckErrorCode::UnknownChord);
-
-    for (const auto& e : errors)
-        CHECK(e.code != CheckErrorCode::AllVoicesSameDirection);
+    bool hasUnknown = false, hasAVSD = false;
+    for (const auto& e : errors) {
+        if (e.code == CheckErrorCode::UnknownChord)          hasUnknown = true;
+        if (e.code == CheckErrorCode::AllVoicesSameDirection) hasAVSD    = true;
+    }
+    CHECK(hasUnknown);
+    CHECK(hasAVSD);
 }
 
 // ── Test 6: absent voice in position → pair skipped ───────────────────────────

@@ -176,16 +176,17 @@ TEST_CASE("CheckParallelIntervals: non-perfect-fifth/octave parallel motion → 
     }
 }
 
-// ── Test 6: unknown chord in pair → voice-leading check skipped ───────────────
+// ── Test 6: unknown chord in pair → voice-leading check still runs ────────────
 //
-// ic1 is known, ic2 is unknown. Pair (0,1) is skipped. Only an UnknownChord
-// diagnostic is produced for ic2; no ParallelFifths error is emitted.
+// ic1 is known, ic2 is unknown with pitches that produce ParallelFifths (T-B P5).
+// After the fix, pairwise checks run regardless of isKnownChord, so both
+// UnknownChord and ParallelFifths are emitted.
 
-TEST_CASE("CheckParallelIntervals: unknown chord in pair skips voice-leading check",
+TEST_CASE("CheckParallelIntervals: unknown chord in pair does not skip voice-leading check",
           "[parallel]") {
     CheckSolutionRuleChecker checker;
 
-    // Same pitches as Test 1 (would produce ParallelFifths if both known)
+    // Same pitches as Test 1 (T-B: G3→A3 and C3→D3 both P5 moving same direction)
     const auto ic1 = knownIC( pn(NoteName::E, 5), pn(NoteName::A, 4),
                                pn(NoteName::G, 3), pn(NoteName::C, 3));
     const auto ic2 = unknownIC(pn(NoteName::F, 5), pn(NoteName::B, 4),
@@ -193,17 +194,13 @@ TEST_CASE("CheckParallelIntervals: unknown chord in pair skips voice-leading che
 
     const auto errors = checker.check({ic1, ic2});
 
-    // ic1's A-T gap (A4→G3 = 9th) triggers MoreThanOctaveBetweenAdjacentVoices,
-    // so total error count may be > 1. The key guarantees are:
-    //   1. UnknownChord is present for ic2.
-    //   2. No pairwise voice-leading check (ParallelFifths) fired.
-    bool hasUnknown = false;
-    for (const auto& e : errors)
-        if (e.code == CheckErrorCode::UnknownChord) hasUnknown = true;
+    bool hasUnknown = false, hasParallelFifths = false;
+    for (const auto& e : errors) {
+        if (e.code == CheckErrorCode::UnknownChord)    hasUnknown       = true;
+        if (e.code == CheckErrorCode::ParallelFifths)  hasParallelFifths = true;
+    }
     CHECK(hasUnknown);
-
-    for (const auto& e : errors)
-        CHECK(e.code != CheckErrorCode::ParallelFifths);
+    CHECK(hasParallelFifths);
 }
 
 // ── Test 7: three consecutive chords → 2 parallel-fifth errors ───────────────

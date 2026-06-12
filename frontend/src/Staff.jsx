@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import CheckErrorsLayer from './CheckErrorsLayer'
 import CheckResultIndicator from './CheckResultIndicator'
 import {
@@ -640,8 +640,7 @@ function buildNoteLayoutMap(measures, notePositions) {
       }
     }
   })
-  console.log('[noteLayoutMap] full map:', map)
-  return map
+  return { map, positions: harmonicPositions }
 }
 
 // ── Check-error visibility filter ───────────────────────────────
@@ -666,6 +665,7 @@ export default function Staff({
   showChordNames = false,
   currentTick = 0, totalTicks = 0, playbackState = 'idle',
   checkErrors = null,
+  dismissedCheckPositions = null,
   highlightedCheckErrorIndex = null,
   onSetHighlightedCheckErrorIndex = null,
   isLoading = false,
@@ -686,7 +686,8 @@ export default function Staff({
   const [preview,         setPreview]         = useState(null)
   const [isDraggingNote,  setIsDraggingNote]  = useState(false)
   const [containerW,      setContainerW]      = useState(0)
-  const [noteLayoutMap,   setNoteLayoutMap]   = useState(null)
+  const [noteLayoutMap,      setNoteLayoutMap]      = useState(null)
+  const [harmonicPositions,  setHarmonicPositions]  = useState([])
 
   // ── Container-width tracking (drives adaptive row layout) ──────
   useEffect(() => {
@@ -1450,7 +1451,9 @@ export default function Staff({
 
     // ── Build note layout map for check-error overlay ──────────────
     if (isCheckMode) {
-      setNoteLayoutMap(buildNoteLayoutMap(measures, notePositionsRef.current))
+      const { map, positions } = buildNoteLayoutMap(measures, notePositionsRef.current)
+      setNoteLayoutMap(map)
+      setHarmonicPositions(positions)
     }
 
   }, [measures, timeSignature, keySignature, anacruisTicks, showBass, singleClef, containerW, selectedNoteId, showChordNames])
@@ -1930,6 +1933,26 @@ export default function Staff({
     }
   }, [measures])
 
+  // Map dismissed {mi:tick} keys → positionIndex set for error filtering
+  const dismissedPosIndices = useMemo(() => {
+    if (!dismissedCheckPositions?.size || !harmonicPositions.length) return null
+    const set = new Set()
+    harmonicPositions.forEach(({ mi, tick }, posIdx) => {
+      if (dismissedCheckPositions.has(`${mi}:${tick}`)) set.add(posIdx)
+    })
+    return set
+  }, [dismissedCheckPositions, harmonicPositions])
+
+  function isErrorDismissed(error) {
+    if (!dismissedPosIndices?.size) return false
+    const from = error.positionIndex ?? 0
+    const to   = error.nextPositionIndex ?? from
+    for (let p = from; p <= to; p++) {
+      if (dismissedPosIndices.has(p)) return true
+    }
+    return false
+  }
+
   return (
     <div
       ref={wrapperRef}
@@ -1951,7 +1974,7 @@ export default function Staff({
       {isCheckMode && (
         <CheckErrorsLayer
           errors={checkErrors && noteLayoutMap
-            ? checkErrors.filter(e => isErrorVisible(e, noteLayoutMap))
+            ? checkErrors.filter(e => isErrorVisible(e, noteLayoutMap) && !isErrorDismissed(e))
             : checkErrors}
           noteLayoutMap={noteLayoutMap}
           canvasRef={canvasRef}

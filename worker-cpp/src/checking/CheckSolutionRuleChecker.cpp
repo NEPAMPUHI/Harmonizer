@@ -19,24 +19,28 @@ bool allVoicesPitched(const CheckHarmonicPosition& pos) {
 // ── single-chord helpers ──────────────────────────────────────────────────────
 
 // Returns the voices (by index 0-3) that are outside their standard SATB range.
-std::vector<int> outOfRangeVoices(const Chord& ch) {
+// Takes individual notes directly so it works for unknown chords too.
+struct VoicePair { int a; int b; };
+
+std::vector<int> outOfRangeVoices(const Note& s, const Note& a,
+                                   const Note& t, const Note& b) {
     std::vector<int> bad;
-    if (!SOPRANO_RANGE.contains(ch.getSoprano())) bad.push_back(0);
-    if (!ALTO_RANGE   .contains(ch.getAlto()))    bad.push_back(1);
-    if (!TENOR_RANGE  .contains(ch.getTenor()))   bad.push_back(2);
-    if (!BASS_RANGE   .contains(ch.getBass()))    bad.push_back(3);
+    if (!SOPRANO_RANGE.contains(s)) bad.push_back(0);
+    if (!ALTO_RANGE   .contains(a)) bad.push_back(1);
+    if (!TENOR_RANGE  .contains(t)) bad.push_back(2);
+    if (!BASS_RANGE   .contains(b)) bad.push_back(3);
     return bad;
 }
 
 // Returns pairs (by index) where adjacent voices exceed the allowed diatonic gap:
 //   S-A or A-T > 8th, T-B > 15th (mirrors HarmonyRules::hasNoMoreThanOctave).
-struct VoicePair { int a; int b; };
-
-std::vector<VoicePair> wideSpacingPairs(const Chord& ch) {
+// Takes individual notes directly so it works for unknown chords too.
+std::vector<VoicePair> wideSpacingPairs(const Note& s, const Note& a,
+                                         const Note& t, const Note& b) {
     std::vector<VoicePair> bad;
-    if (ch.getSoprano().getInterval(ch.getAlto()).number  > 8)  bad.push_back({0, 1});
-    if (ch.getAlto()   .getInterval(ch.getTenor()).number > 8)  bad.push_back({1, 2});
-    if (ch.getTenor()  .getInterval(ch.getBass()) .number > 15) bad.push_back({2, 3});
+    if (s.getInterval(a).number > 8)  bad.push_back({0, 1});
+    if (a.getInterval(t).number > 8)  bad.push_back({1, 2});
+    if (t.getInterval(b).number > 15) bad.push_back({2, 3});
     return bad;
 }
 
@@ -179,7 +183,7 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
 
         if (!allVoicesPitched(pos)) continue;
 
-        // UnknownChord — always enforced
+        // UnknownChord — always enforced; does NOT skip note-only checks below
         if (!ic.isKnownChord) {
             CheckError e;
             e.code          = CheckErrorCode::UnknownChord;
@@ -187,14 +191,11 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
             e.positionIndex = i;
             e.renderType    = CheckRenderType::ChordMarker;
             errors.push_back(e);
-            continue;
         }
 
-        const Chord& ch = ic.chord;
-
-        // VoiceRangeViolation
+        // VoiceRangeViolation — note-only, works for unknown chords
         if (rules.voiceRanges) {
-            for (int v : outOfRangeVoices(ch)) {
+            for (int v : outOfRangeVoices(pos.soprano, pos.alto, pos.tenor, pos.bass)) {
                 CheckError e;
                 e.code          = CheckErrorCode::VoiceRangeViolation;
                 e.message       = "Voice out of range";
@@ -205,10 +206,10 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
             }
         }
 
-        // MoreThanOctaveBetweenAdjacentVoices
+        // MoreThanOctaveBetweenAdjacentVoices — note-only, works for unknown chords
         // S-A and A-T pairs: conditional on largeIntervalSaAt.
         // T-B pair: always enforced.
-        for (auto [a, b] : wideSpacingPairs(ch)) {
+        for (auto [a, b] : wideSpacingPairs(pos.soprano, pos.alto, pos.tenor, pos.bass)) {
             if (a == 2 && b == 3) {
                 if (!rules.voiceSpacingOctave) continue;
             } else if (!rules.largeIntervalSaAt) {
@@ -229,16 +230,16 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
         const auto& prev = chords[i];
         const auto& curr = chords[i + 1];
 
-        if (!prev.isKnownChord || !curr.isKnownChord) continue;
         if (!allVoicesPitched(prev.position) || !allVoicesPitched(curr.position)) continue;
 
+        // Use position notes directly — works for both known and unknown chords
         const Note pN[4] = {
-            prev.chord.getSoprano(), prev.chord.getAlto(),
-            prev.chord.getTenor(),   prev.chord.getBass()
+            prev.position.soprano, prev.position.alto,
+            prev.position.tenor,   prev.position.bass
         };
         const Note cN[4] = {
-            curr.chord.getSoprano(), curr.chord.getAlto(),
-            curr.chord.getTenor(),   curr.chord.getBass()
+            curr.position.soprano, curr.position.alto,
+            curr.position.tenor,   curr.position.bass
         };
 
         // VoiceCrossing
@@ -287,7 +288,7 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
 
         // HiddenOctaves and HiddenFifths
         if (rules.hiddenIntervals) {
-            const int sn = curr.chord.getBass().getSimpleInterval(curr.chord.getSoprano()).number;
+            const int sn = curr.position.bass.getSimpleInterval(curr.position.soprano).number;
             if (sn == 1 && bassSopranSameDir(pN[0], pN[3], cN[0], cN[3])) {
                 CheckError e;
                 e.code              = CheckErrorCode::HiddenOctaves;
@@ -388,7 +389,7 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
 
         // AugmentedIntervalInBass
         if (rules.augmentedBass) {
-            Interval bassInterval = prev.chord.getBass().getInterval(curr.chord.getBass());
+            Interval bassInterval = prev.position.bass.getInterval(curr.position.bass);
             if (bassInterval.quality == IntervalQuality::Augmented) {
                 CheckError e;
                 e.code              = CheckErrorCode::AugmentedIntervalInBass;
@@ -418,8 +419,9 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
             }
         }
 
-        // FunctionalProgressionError
+        // FunctionalProgressionError — requires chord template, skip unknown chords
         if (rules.functionalRules
+            && prev.isKnownChord && curr.isKnownChord
             && !HarmonyRules::isValidFunctionalProgression(prev.chord, curr.chord)) {
             CheckError e;
             e.code              = CheckErrorCode::FunctionalProgressionError;
@@ -438,14 +440,13 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
             const auto& pv = chords[i - 1];
             const auto& cu = chords[i];
 
-            if (!pp.isKnownChord || !pv.isKnownChord || !cu.isKnownChord) continue;
             if (!allVoicesPitched(pp.position)
                 || !allVoicesPitched(pv.position)
                 || !allVoicesPitched(cu.position)) continue;
 
-            const Note b0 = pp.chord.getBass();
-            const Note b1 = pv.chord.getBass();
-            const Note b2 = cu.chord.getBass();
+            const Note b0 = pp.position.bass;
+            const Note b1 = pv.position.bass;
+            const Note b2 = cu.position.bass;
 
             if (hasConsecutiveBassInterval(b0, b1, b2, 4)) {
                 CheckError e;
