@@ -96,8 +96,9 @@ private:
     static bool hasNoParallelSeconds(const Chord& previous, const Chord& current);
     static bool hasNoParallelSeventh(const Chord& previous, const Chord& current);
     static bool hasNoAugmentedInBass(const Chord& previous, const Chord& current);
-    static bool hasNoVoiceLeapGreaterThanOctave(const Chord& previous, const Chord& current);
+    static bool hasNoVoiceLeapGreaterThanCan(const Chord& previous, const Chord& current);
     static bool isLeapGreaterThanOctave(const Note& a, const Note& b);
+    static bool isLeapGreaterThanFourth(const Note& a, const Note& b);
     static bool checkDoubledThirdInSixChord(const Chord& previous, const Chord& current);
     static bool containsDoubledThird(const Chord& chord);
     static int normalizeDegree(int degree);

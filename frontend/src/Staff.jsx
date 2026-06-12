@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import CheckErrorsLayer from './CheckErrorsLayer'
+import CheckResultIndicator from './CheckResultIndicator'
 import {
   Renderer, Stave, StaveNote, GhostNote, Voice, Formatter, Beam, Tuplet,
   StaveConnector, BarlineType, Accidental, StaveTie, Dot,
@@ -593,8 +594,12 @@ function computeCursorPosition(currentTick, stavesArr, measures, timeSignature, 
 }
 
 // ── Check-error layout map builder ──────────────────────────────
-// Maps positionIndex (C++ sequential index) → { soprano, alto, tenor, bass } → { x, y }
-// using the note positions recorded after VexFlow renders.
+// Maps positionIndex (C++ sequential index) → { soprano, alto, tenor, bass } → bbox
+// getAbsoluteX() approximates notehead center X; half-extents are approximated since
+// VexFlow doesn't expose exact notehead bounds.
+const NOTE_HEAD_HALF_W = 6   // approximate notehead half-width in SVG px
+const NOTE_HEAD_HALF_H = 4   // approximate notehead half-height in SVG px
+
 function buildNoteLayoutMap(measures, notePositions) {
   const posById = {}
   notePositions.forEach(p => { posById[p.id] = p })
@@ -620,11 +625,36 @@ function buildNoteLayoutMap(measures, notePositions) {
       const note = allNotes.find(n => !n.isRest && n.voice === voice && n.positionTick === tick)
       if (note && posById[note.id]) {
         const p = posById[note.id]
-        map[posIdx][voice] = { x: p.svgX, y: p.svgY }
+        const box = {
+          x:       p.svgX,
+          y:       p.svgY,
+          centerX: p.svgX,
+          centerY: p.svgY,
+          left:    p.svgX - NOTE_HEAD_HALF_W,
+          right:   p.svgX + NOTE_HEAD_HALF_W,
+          top:     p.svgY - NOTE_HEAD_HALF_H,
+          bottom:  p.svgY + NOTE_HEAD_HALF_H,
+        }
+        console.log(`[noteLayoutMap] posIdx=${posIdx} voice=${voice}`, box)
+        map[posIdx][voice] = box
       }
     }
   })
+  console.log('[noteLayoutMap] full map:', map)
   return map
+}
+
+// ── Check-error visibility filter ───────────────────────────────
+// Returns true only when all position anchors the error needs exist in the map.
+function isErrorVisible(error, map) {
+  if (!map) return false
+  const pos1 = map[error.positionIndex]
+  if (!pos1 || Object.keys(pos1).length === 0) return false
+  if (error.nextPositionIndex != null) {
+    const pos2 = map[error.nextPositionIndex]
+    if (!pos2 || Object.keys(pos2).length === 0) return false
+  }
+  return true
 }
 
 // ── Component ───────────────────────────────────────────────────
@@ -636,6 +666,11 @@ export default function Staff({
   showChordNames = false,
   currentTick = 0, totalTicks = 0, playbackState = 'idle',
   checkErrors = null,
+  highlightedCheckErrorIndex = null,
+  onSetHighlightedCheckErrorIndex = null,
+  isLoading = false,
+  loadingText = '',
+  staffToast = null,
 }) {
   const canvasRef  = useRef(null)
   const wrapperRef = useRef(null)
@@ -1915,9 +1950,20 @@ export default function Staff({
 
       {isCheckMode && (
         <CheckErrorsLayer
-          errors={checkErrors}
+          errors={checkErrors && noteLayoutMap
+            ? checkErrors.filter(e => isErrorVisible(e, noteLayoutMap))
+            : checkErrors}
           noteLayoutMap={noteLayoutMap}
           canvasRef={canvasRef}
+          highlightedCheckErrorIndex={highlightedCheckErrorIndex}
+        />
+      )}
+
+      {isCheckMode && (
+        <CheckResultIndicator
+          checkErrors={checkErrors}
+          highlightedCheckErrorIndex={highlightedCheckErrorIndex}
+          onSetHighlightedIndex={onSetHighlightedCheckErrorIndex}
         />
       )}
 
@@ -1940,6 +1986,21 @@ export default function Staff({
               <span className="preview-voice-badge">{VOICE_BADGE[preview.previewVoice]}</span>
             )}
           </div>
+        </div>
+      )}
+
+      {isLoading && (
+        <div className="staff-loading-overlay">
+          <div className="staff-loading-content">
+            <span className="staff-loading-spinner" />
+            <span className="staff-loading-text">{loadingText}</span>
+          </div>
+        </div>
+      )}
+
+      {staffToast?.visible && (
+        <div className={`staff-toast${staffToast.closing ? ' closing' : ''}`}>
+          {staffToast.message}
         </div>
       )}
     </div>

@@ -20,6 +20,10 @@ struct ActiveRuleSet {
     bool hiddenIntervals   = true;   // "hidden_octaves"       (octaves + fifths)
     bool bassLeapSequence  = true;   // "bass_leap_sequence"   (consecutive 4ths/5ths)
     bool largeIntervalSaAt = true;   // "large_interval_sa_at" (S-A, A-T > octave)
+    bool voiceRanges       = true;   // "voice_ranges"         (SATB range limits)
+    bool augmentedBass     = true;   // "augmented_bass"       (augmented leap in bass)
+    bool voiceLeapLimits   = true;   // "voice_leap_limits"    (S/B > octave, A/T > fourth)
+    bool voiceSpacingOctave = true;  // "voice_spacing_octave" (any adjacent pair > octave / double-octave)
 
     // Functional progression — umbrella switch for the entire
     // checkGeneralProgressionRules() block plus all position-aware functional

@@ -105,10 +105,12 @@ TEST_CASE("HarmonyRules: Rejects bass leap greater than octave", "[HarmonyRules]
 }
 
 TEST_CASE("HarmonyRules: Allows soprano leap exactly one octave", "[HarmonyRules][VoiceLeap]") {
-    Chord curr = makeCurrentChord();
+    // curr: E5/E4/C4/C3 — S-A exactly one octave (at the boundary), all voices in range
+    const Chord curr(n(NoteName::E, 5), n(NoteName::E, 4), n(NoteName::C, 4), n(NoteName::C, 3), T53_TMPL);
     REQUIRE(HarmonyRules::isValidChord(curr));
 
-    // prev soprano = E4 (one octave below E5): leap = 12 semitones — exactly allowed
-    Chord prev(n(NoteName::E, 4), n(NoteName::C, 5), n(NoteName::E, 4), n(NoteName::C, 3), T53_TMPL);
+    // prev soprano = E4 (one octave below E5): leap = 12 semitones — exactly allowed.
+    // prev alto = E4 so prev.soprano == curr.alto — no cross-chord voice overlap.
+    const Chord prev(n(NoteName::E, 4), n(NoteName::E, 4), n(NoteName::C, 4), n(NoteName::C, 3), T53_TMPL);
     CHECK(HarmonyRules::isValidConnection(prev, curr));
 }

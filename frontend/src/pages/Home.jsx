@@ -37,6 +37,10 @@ const FORBIDDEN_RULES = [
   { id: 'chromatic_transfer',   label: 'передача хроматичного півтона в інший голос' },
   { id: 'bass_leap_sequence',   label: '2 послідовні ходи по квартам/квінтам в басу' },
   { id: 'large_interval_sa_at', label: 'більше октави між S і A, A і T' },
+  { id: 'voice_ranges',         label: 'вихід за межі діапазону голосів' },
+  { id: 'augmented_bass',       label: 'збільшені інтервали в басу' },
+  { id: 'voice_leap_limits',    label: 'стрибки >8 для S/B та >4 для A/T' },
+  { id: 'voice_spacing_octave', label: 'відстань між голосами понад октаву' },
 ]
 
 const ALLOWED_CHORDS = [
@@ -418,13 +422,16 @@ export default function Home() {
   const [harmonizeVariants,   setHarmonizeVariants]   = useState([])
   const [harmonizeError,      setHarmonizeError]      = useState(null)
   const [selectedVariantIdx,  setSelectedVariantIdx]  = useState(0)
+  const [staffToast,          setStaffToast]          = useState({ message: '', visible: false, closing: false })
+  const toastTimerRef = useRef({ show: null, hide: null })
   const [dlDropdownOpen,      setDlDropdownOpen]      = useState(false)
   const dlDropdownRef   = useRef(null)
   const resultStaffRef  = useRef(null)
 
   // ── Check mode ───────────────────────────────────────────────────
-  const [isChecking,   setIsChecking]   = useState(false)
-  const [checkErrors,  setCheckErrors]  = useState(null)  // null=not checked, []|[...]=result
+  const [isChecking,                 setIsChecking]                 = useState(false)
+  const [checkErrors,                setCheckErrors]                = useState(null)  // null=not checked, []|[...]=result
+  const [highlightedCheckErrorIndex, setHighlightedCheckErrorIndex] = useState(null)
 
   // ── Scale modes (harmonize mode) ────────────────────────────────
   const [selectedModes, setSelectedModes] = useState(['natural', 'harmonic', 'melodic'])
@@ -1688,6 +1695,36 @@ export default function Home() {
     await exportSvgToPng(svg, filename)
   }
 
+  // ── Toast ────────────────────────────────────────────────────────
+  function getUkrainianErrorMessage(err) {
+    const msg = (err?.message ?? '').toLowerCase()
+    if (!msg || msg === 'failed to fetch' || msg.startsWith('networkerror') || msg.includes('fetch'))
+      return 'Не вдалося з\'єднатися із сервером'
+    if (msg.includes('timeout') || msg.includes('timed out'))
+      return 'Сервер не відповів вчасно'
+    if (msg.includes('no harmonization variants') || msg.includes('no variants generated'))
+      return 'Неможливо гармонізувати за обраними правилами гармонії'
+    if (msg.includes('504') || msg.includes('gateway'))
+      return 'Шлюз не відповідає (504)'
+    if (msg.includes('503') || msg.includes('unavailable'))
+      return 'Сервер тимчасово недоступний'
+    if (msg.includes('500'))
+      return 'Внутрішня помилка сервера (500)'
+    return err?.message || 'Сталася невідома помилка'
+  }
+
+  function showStaffToast(message) {
+    clearTimeout(toastTimerRef.current.show)
+    clearTimeout(toastTimerRef.current.hide)
+    setStaffToast({ message, visible: true, closing: false })
+    toastTimerRef.current.show = setTimeout(() => {
+      setStaffToast(prev => ({ ...prev, closing: true }))
+      toastTimerRef.current.hide = setTimeout(() => {
+        setStaffToast({ message: '', visible: false, closing: false })
+      }, 1000)
+    }, 3000)
+  }
+
   // ── Harmonization ────────────────────────────────────────────────
   async function requestHarmonize() {
     setUiState('harmonizingLoading')
@@ -1703,8 +1740,14 @@ export default function Home() {
       console.log('[harmonize] jobId=', jobId, '— polling...')
       const workerData = await pollJobResult(jobId)
       console.log('[harmonize] result:', workerData?.status, 'results:', workerData?.results?.length ?? 0, 'errors:', workerData?.errors)
-      if (!workerData || workerData.status === 'error' || !workerData.results?.length) {
+      if (!workerData || workerData.status === 'error') {
         throw new Error(workerData?.errors?.[0]?.message ?? 'Не вдалося гармонізувати')
+      }
+      if (!workerData.results?.length) {
+        showStaffToast('Неможливо гармонізувати за обраними правилами гармонії')
+        setHarmonizeVariants([])
+        setUiState('editing')
+        return
       }
       const variants = workerResultToVariants(workerData, tonality)
       setHarmonizeVariants(variants)
@@ -1712,6 +1755,7 @@ export default function Home() {
       setUiState('harmonizationResults')
     } catch (err) {
       console.error('[harmonize] error:', err.message)
+      showStaffToast(getUkrainianErrorMessage(err))
       setHarmonizeError(err.message)
       setHarmonizeVariants([])
       setUiState('editing')
@@ -1766,10 +1810,14 @@ export default function Home() {
       })
       const { jobId } = await submitJob(workerReq)
       const result    = await pollJobResult(jobId)
-      console.log('[worker] check_solution response:', result)
-      setCheckErrors(result?.errors ?? [])
+      console.log('[check_solution response]', result)
+      console.log('[check_solution errors]', result?.errors)
+      const rawErrors = result?.errors ?? []
+      setHighlightedCheckErrorIndex(null)
+      setCheckErrors(rawErrors.map((e, i) => ({ ...e, __index: i })))
     } catch (err) {
       console.error('[worker] check failed:', err)
+      showStaffToast(getUkrainianErrorMessage(err))
     } finally {
       setIsChecking(false)
     }
@@ -1869,6 +1917,11 @@ export default function Home() {
 
   // ── Derived state for toolbar ────────────────────────────────────
   const isHarmonizing = uiState === 'harmonizingLoading'
+  const staffLoadingText = isChecking
+    ? 'Перевіряю задачу...'
+    : isHarmonizing
+      ? (clefMode === 'bass' ? 'Гармонізую бас...' : 'Гармонізую мелодію...')
+      : ''
   const canUndo      = pendingTriplet !== null || undoStack.length > 0
   const canRemove    = measures.length > (hasAnacrusis ? 2 : 1)
   const canAddMeasure = measures.length < MAX_MEASURES + (hasAnacrusis ? 1 : 0)
@@ -2059,7 +2112,7 @@ export default function Home() {
           )}
         </div>
 
-        {uiState === 'editing' && (
+        {(uiState === 'editing' || uiState === 'harmonizingLoading') && (
           <Staff
             measures={measures}
             timeSignature={timeSignature}
@@ -2081,34 +2134,14 @@ export default function Home() {
             totalTicks={totalTicks}
             playbackState={playbackState}
             checkErrors={mode === 'check' ? checkErrors : null}
+            highlightedCheckErrorIndex={mode === 'check' ? highlightedCheckErrorIndex : null}
+            onSetHighlightedCheckErrorIndex={setHighlightedCheckErrorIndex}
+            isLoading={isChecking || isHarmonizing}
+            loadingText={staffLoadingText}
+            staffToast={staffToast}
           />
         )}
 
-        {uiState === 'harmonizingLoading' && (
-          <div className="harmonize-loading">
-            <span className="harmonize-spinner" />
-            Гармонізую мелодію…
-          </div>
-        )}
-
-        {uiState === 'editing' && harmonizeError && (
-          <div className="harmonize-error">{harmonizeError}</div>
-        )}
-
-        {isChecking && (
-          <div className="harmonize-loading">
-            <span className="harmonize-spinner" />
-            Перевіряємо задачу…
-          </div>
-        )}
-
-        {mode === 'check' && !isChecking && checkErrors !== null && (
-          <div className={`check-result-banner${checkErrors.length === 0 ? ' check-result-ok' : ' check-result-fail'}`}>
-            {checkErrors.length === 0
-              ? '✓ Помилок не виявлено'
-              : `Знайдено помилок: ${checkErrors.length}`}
-          </div>
-        )}
 
         {uiState === 'harmonizationResults' && harmonizeVariants[selectedVariantIdx] && (
           <div ref={resultStaffRef} style={{ display: 'contents' }}>

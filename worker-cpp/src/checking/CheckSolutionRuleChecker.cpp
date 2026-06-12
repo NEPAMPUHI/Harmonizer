@@ -192,15 +192,17 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
 
         const Chord& ch = ic.chord;
 
-        // VoiceRangeViolation — always enforced
-        for (int v : outOfRangeVoices(ch)) {
-            CheckError e;
-            e.code          = CheckErrorCode::VoiceRangeViolation;
-            e.message       = "Voice out of range";
-            e.positionIndex = i;
-            e.voices        = {V[v]};
-            e.renderType    = CheckRenderType::ChordMarker;
-            errors.push_back(e);
+        // VoiceRangeViolation
+        if (rules.voiceRanges) {
+            for (int v : outOfRangeVoices(ch)) {
+                CheckError e;
+                e.code          = CheckErrorCode::VoiceRangeViolation;
+                e.message       = "Voice out of range";
+                e.positionIndex = i;
+                e.voices        = {V[v]};
+                e.renderType    = CheckRenderType::ChordMarker;
+                errors.push_back(e);
+            }
         }
 
         // MoreThanOctaveBetweenAdjacentVoices
@@ -208,7 +210,7 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
         // T-B pair: always enforced.
         for (auto [a, b] : wideSpacingPairs(ch)) {
             if (a == 2 && b == 3) {
-                // T-B: always enforced
+                if (!rules.voiceSpacingOctave) continue;
             } else if (!rules.largeIntervalSaAt) {
                 continue;
             }
@@ -384,8 +386,8 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
             }
         }
 
-        // AugmentedIntervalInBass — always enforced
-        {
+        // AugmentedIntervalInBass
+        if (rules.augmentedBass) {
             Interval bassInterval = prev.chord.getBass().getInterval(curr.chord.getBass());
             if (bassInterval.quality == IntervalQuality::Augmented) {
                 CheckError e;
@@ -399,17 +401,20 @@ CheckSolutionRuleChecker::check(const std::vector<IdentifiedCheckChord>& chords,
             }
         }
 
-        // VoiceLeapGreaterThanOctave — always enforced
-        for (int v = 0; v < 4; ++v) {
-            if (std::abs(pN[v].getSemitone() - cN[v].getSemitone()) > 12) {
-                CheckError e;
-                e.code              = CheckErrorCode::VoiceLeapGreaterThanOctave;
-                e.message           = "Voice leap greater than an octave";
-                e.positionIndex     = i;
-                e.nextPositionIndex = i + 1;
-                e.voices            = {V[v]};
-                e.renderType        = CheckRenderType::MotionLines;
-                errors.push_back(e);
+        // VoiceLeapGreaterThanCan: S and B > octave, A and T > fourth
+        if (rules.voiceLeapLimits) {
+            const int semitoneMax[4] = {12, 5, 5, 12};
+            for (int v = 0; v < 4; ++v) {
+                if (std::abs(pN[v].getSemitone() - cN[v].getSemitone()) > semitoneMax[v]) {
+                    CheckError e;
+                    e.code              = CheckErrorCode::VoiceLeapGreaterThanOctave;
+                    e.message           = "Voice leap greater than allowed interval";
+                    e.positionIndex     = i;
+                    e.nextPositionIndex = i + 1;
+                    e.voices            = {V[v]};
+                    e.renderType        = CheckRenderType::MotionLines;
+                    errors.push_back(e);
+                }
             }
         }
 

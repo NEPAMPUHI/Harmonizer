@@ -10,16 +10,20 @@ bool contains(const std::vector<std::string>& v, const std::string& id) {
 ActiveRuleSet ActiveRuleSet::fromSettings(const HarmonizationSettings& settings) {
     const auto& fr = settings.forbiddenRules;
     ActiveRuleSet rs;
-    rs.parallelFifths    = contains(fr, "parallel_fifths");
-    rs.parallelOctaves   = contains(fr, "parallel_octaves");
-    rs.parallelSeconds   = contains(fr, "parallel_seconds");
-    rs.allVoicesSameDir  = contains(fr, "all_voices_same_dir");
-    rs.voiceCrossing     = contains(fr, "voice_crossing");
-    rs.chromaticTransfer = contains(fr, "chromatic_transfer");
-    rs.hiddenIntervals   = contains(fr, "hidden_octaves");
-    rs.bassLeapSequence  = contains(fr, "bass_leap_sequence");
-    rs.largeIntervalSaAt = contains(fr, "large_interval_sa_at");
-    rs.functionalRules   = contains(fr, "s_after_d");
+    rs.parallelFifths     = contains(fr, "parallel_fifths");
+    rs.parallelOctaves    = contains(fr, "parallel_octaves");
+    rs.parallelSeconds    = contains(fr, "parallel_seconds");
+    rs.allVoicesSameDir   = contains(fr, "all_voices_same_dir");
+    rs.voiceCrossing      = contains(fr, "voice_crossing");
+    rs.chromaticTransfer  = contains(fr, "chromatic_transfer");
+    rs.hiddenIntervals    = contains(fr, "hidden_octaves");
+    rs.bassLeapSequence   = contains(fr, "bass_leap_sequence");
+    rs.largeIntervalSaAt  = contains(fr, "large_interval_sa_at");
+    rs.voiceRanges        = contains(fr, "voice_ranges");
+    rs.augmentedBass      = contains(fr, "augmented_bass");
+    rs.voiceLeapLimits    = contains(fr, "voice_leap_limits");
+    rs.voiceSpacingOctave = contains(fr, "voice_spacing_octave");
+    rs.functionalRules    = contains(fr, "s_after_d");
     return rs;
 }
 
@@ -29,15 +33,19 @@ ActiveRuleSet ActiveRuleSet::allEnabled() {
 
 ActiveRuleSet ActiveRuleSet::allDisabled() {
     ActiveRuleSet rs;
-    rs.parallelFifths    = false;
-    rs.parallelOctaves   = false;
-    rs.parallelSeconds   = false;
-    rs.allVoicesSameDir  = false;
-    rs.voiceCrossing     = false;
-    rs.chromaticTransfer = false;
-    rs.hiddenIntervals   = false;
-    rs.bassLeapSequence  = false;
-    rs.largeIntervalSaAt = false;
-    rs.functionalRules   = false;
+    rs.parallelFifths     = false;
+    rs.parallelOctaves    = false;
+    rs.parallelSeconds    = false;
+    rs.allVoicesSameDir   = false;
+    rs.voiceCrossing      = false;
+    rs.chromaticTransfer  = false;
+    rs.hiddenIntervals    = false;
+    rs.bassLeapSequence   = false;
+    rs.largeIntervalSaAt  = false;
+    rs.voiceRanges        = false;
+    rs.augmentedBass      = false;
+    rs.voiceLeapLimits    = false;
+    rs.voiceSpacingOctave = false;
+    rs.functionalRules    = false;
     return rs;
 }

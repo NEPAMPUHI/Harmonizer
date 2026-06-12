@@ -30,7 +30,7 @@ JobResult TaskDispatcher::dispatchHarmonizeBass(const HarmonizationJob& job) {
 JobResult TaskDispatcher::dispatchCheckSolution(const HarmonizationJob& job) {
     const auto positions   = CheckHarmonicPositionBuilder{}.build(job.checkSolutionInput);
     const auto identified  = CheckChordIdentifier{}.identify(positions, job.settings);
-    const auto rules       = ActiveRuleSet::fromSettings(job.settings);
+    const auto rules       = ActiveRuleSet::allEnabled();
     const auto checkErrors = CheckSolutionRuleChecker{}.check(identified, rules);
 
     // Debug — first 5 positions

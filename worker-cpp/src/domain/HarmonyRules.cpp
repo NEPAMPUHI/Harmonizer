@@ -169,9 +169,10 @@ bool HarmonyRules::isValidFunctionalProgression(const Chord& previous, const Cho
 // ── Rules-aware public overloads ──────────────────────────────────────────────
 
 bool HarmonyRules::isValidChord(const Chord& current, const ActiveRuleSet& rules) {
-    return checkVoiceRangeRules(current)
-        && checkVoiceSpacingRules(current, rules)
-        && hasValidSecondDegreeTriad(current);
+    if (rules.voiceRanges && !hasValidVoiceRanges(current)) return false;
+    if (!checkVoiceSpacingRules(current, rules))            return false;
+    if (!hasValidSecondDegreeTriad(current))                return false;
+    return true;
 }
 
 bool HarmonyRules::isValidChord(const Chord& current, const HarmonicPosition& position,
@@ -216,8 +217,9 @@ bool HarmonyRules::checkVoiceSpacingRules(const Chord& current, const ActiveRule
         if (current.getSoprano().getInterval(current.getAlto()).number  > 8)  return false;
         if (current.getAlto()   .getInterval(current.getTenor()).number > 8)  return false;
     }
-    // T-B is always enforced — no frontend control
-    if (current.getTenor().getInterval(current.getBass()).number > 15) return false;
+    if (rules.voiceSpacingOctave) {
+        if (current.getTenor().getInterval(current.getBass()).number > 15) return false;
+    }
     return true;
 }
 
@@ -236,9 +238,8 @@ bool HarmonyRules::checkVoiceLeadingRules(const Chord& previous, const Chord& cu
     if (rules.parallelOctaves   && !hasNoParallelOctavesOrUnisons(previous, current))   return false;
     if (rules.parallelSeconds   && !hasNoParallelSeconds(previous, current))            return false;
     if (rules.parallelSeconds   && !hasNoParallelSeventh(previous, current))            return false;
-    // Always enforced: augmented bass intervals, voice leaps > octave
-    if (!hasNoAugmentedInBass(previous, current))            return false;
-    if (!hasNoVoiceLeapGreaterThanOctave(previous, current)) return false;
+    if (rules.augmentedBass   && !hasNoAugmentedInBass(previous, current))         return false;
+    if (rules.voiceLeapLimits && !hasNoVoiceLeapGreaterThanCan(previous, current)) return false;
     return true;
 }
 
@@ -358,6 +359,9 @@ bool HarmonyRules::hasNoVoiceCrossing(const Chord& previous, const Chord& curren
     if (current.getSoprano() < previous.getAlto()) return false;
     if (current.getAlto() < previous.getTenor()) return false;
     if (current.getTenor() < previous.getBass()) return false;
+    if (previous.getSoprano() < current.getAlto()) return false;
+    if (previous.getAlto() < current.getTenor()) return false;
+    if (previous.getTenor() < current.getBass()) return false;
 
     return true;
 }
@@ -732,9 +736,13 @@ bool HarmonyRules::isLeapGreaterThanOctave(const Note& a, const Note& b) {
     return std::abs(a.getSemitone() - b.getSemitone()) > 12;
 }
 
-bool HarmonyRules::hasNoVoiceLeapGreaterThanOctave(const Chord& previous, const Chord& current) {
+bool HarmonyRules::isLeapGreaterThanFourth(const Note& a, const Note& b) {
+    return std::abs(a.getSemitone() - b.getSemitone()) > 5;
+}
+
+bool HarmonyRules::hasNoVoiceLeapGreaterThanCan(const Chord& previous, const Chord& current) {
     return !isLeapGreaterThanOctave(previous.getSoprano(), current.getSoprano())
-        && !isLeapGreaterThanOctave(previous.getAlto(), current.getAlto())
-        && !isLeapGreaterThanOctave(previous.getTenor(), current.getTenor())
+        && !isLeapGreaterThanFourth(previous.getAlto(), current.getAlto())
+        && !isLeapGreaterThanFourth(previous.getTenor(), current.getTenor())
         && !isLeapGreaterThanOctave(previous.getBass(), current.getBass());
 }
