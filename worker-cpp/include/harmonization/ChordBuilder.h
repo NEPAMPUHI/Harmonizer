@@ -13,6 +13,7 @@ class ChordBuilder {
 public:
     std::vector<Chord> buildForFixedMelodyNote(const Note& melodyNote, const HarmonizationSettings& settings);
     std::vector<Chord> buildForFixedBassNote(const Note& bassNote, const HarmonizationSettings& settings);
+    std::vector<Chord> buildAllValid(const HarmonizationSettings& settings);
 
     bool canUseTemplate(const ChordTemplate& chordTemplate, const Note& fixedNote,
                         HarmonizationMode mode, const HarmonizationSettings& settings) const;
@@ -31,7 +32,6 @@ public:
 
 private:
     std::vector<ChordTemplate> getAllowedTemplates(const HarmonizationSettings& settings) const;
-    bool templateMatchesAllowedName(const ChordTemplate& tmpl, const std::string& chordName) const;
 };
 
 #endif

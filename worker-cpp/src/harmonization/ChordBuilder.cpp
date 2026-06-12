@@ -81,15 +81,15 @@ PitchClass degreeToNote(int degree, const std::string& key,
 Note fitInRange(NoteName name, int alter, int degree,
                 const VoiceRange& range, int ceilingSemitone) {
     for (int oct = 9; oct >= 0; --oct) {
-        Note candidate(name, oct, alter, degree, Duration{}, false);
+        Note candidate(name, oct, alter, degree, 4, false);
         if (candidate.getSemitone() <= ceilingSemitone && range.contains(candidate))
             return candidate;
     }
     for (int oct = 0; oct <= 9; ++oct) {
-        Note candidate(name, oct, alter, degree, Duration{}, false);
+        Note candidate(name, oct, alter, degree, 4, false);
         if (range.contains(candidate)) return candidate;
     }
-    return Note(name, range.min.getOctave(), alter, degree, Duration{}, false);
+    return Note(name, range.min.getOctave(), alter, degree, 4, false);
 }
 
 // Lowest valid note of (name,alter,degree) at or above floorSemitone within range.
@@ -97,15 +97,15 @@ Note fitInRange(NoteName name, int alter, int degree,
 Note fitAbove(NoteName name, int alter, int degree,
               const VoiceRange& range, int floorSemitone) {
     for (int oct = 0; oct <= 9; ++oct) {
-        Note candidate(name, oct, alter, degree, Duration{}, false);
+        Note candidate(name, oct, alter, degree, 4, false);
         if (candidate.getSemitone() >= floorSemitone && range.contains(candidate))
             return candidate;
     }
     for (int oct = 0; oct <= 9; ++oct) {
-        Note candidate(name, oct, alter, degree, Duration{}, false);
+        Note candidate(name, oct, alter, degree, 4, false);
         if (range.contains(candidate)) return candidate;
     }
-    return Note(name, range.max.getOctave(), alter, degree, Duration{}, false);
+    return Note(name, range.max.getOctave(), alter, degree, 4, false);
 }
 
 // ── multi-note placement helpers ─────────────────────────────────────────────
@@ -115,7 +115,7 @@ std::vector<Note> fitAllInRange(NoteName name, int alter, int degree,
                                 const VoiceRange& range, int ceilingSemitone) {
     std::vector<Note> result;
     for (int oct = 9; oct >= 0; --oct) {
-        Note candidate(name, oct, alter, degree, Duration{}, false);
+        Note candidate(name, oct, alter, degree, 4, false);
         if (candidate.getSemitone() <= ceilingSemitone && range.contains(candidate))
             result.push_back(candidate);
     }
@@ -127,7 +127,7 @@ std::vector<Note> fitAllAbove(NoteName name, int alter, int degree,
                                const VoiceRange& range, int floorSemitone) {
     std::vector<Note> result;
     for (int oct = 0; oct <= 9; ++oct) {
-        Note candidate(name, oct, alter, degree, Duration{}, false);
+        Note candidate(name, oct, alter, degree, 4, false);
         if (candidate.getSemitone() >= floorSemitone && range.contains(candidate))
             result.push_back(candidate);
     }
@@ -170,9 +170,11 @@ std::vector<Chord> voiceMelodyChords(const Note& soprano, const ChordTemplate& t
 
     int altoCeiling = adjacentCeiling(soprano.getSemitone(), d[0], d[1], pos);
     Note alto = fitInRange(apc.name, apc.alter, d[1], ALTO_RANGE, altoCeiling);
+    if (alto.getSemitone() > altoCeiling) return {};  // no valid alto ≤ soprano: skip template
 
     int tenorCeiling = adjacentCeiling(alto.getSemitone(), d[1], d[2], pos);
     Note tenor = fitInRange(tpc.name, tpc.alter, d[2], TENOR_RANGE, tenorCeiling);
+    if (tenor.getSemitone() > tenorCeiling) return {};  // no valid tenor ≤ alto: skip template
 
     auto bassCandidates = fitAllInRange(bpc.name, bpc.alter, d[3], BASS_RANGE,
                                         tenor.getSemitone());
@@ -209,9 +211,11 @@ std::vector<Chord> voiceBassChords(const Note& bass, const ChordTemplate& tmpl,
 
         int altoFloor   = adjacentFloor(tenor.getSemitone(), d[2], d[1], pos);
         Note alto       = fitAbove(apc.name, apc.alter, d[1], ALTO_RANGE, altoFloor);
+        if (alto.getSemitone() < altoFloor) continue;  // no valid alto ≥ tenor: skip this tenor
 
         int sopranoFloor = adjacentFloor(alto.getSemitone(), d[1], d[0], pos);
         Note soprano     = fitAbove(spc.name, spc.alter, d[0], SOPRANO_RANGE, sopranoFloor);
+        if (soprano.getSemitone() < sopranoFloor) continue;  // no valid soprano ≥ alto: skip this tenor
 
         Chord chord(soprano, alto, tenor, bass, tmpl);
         if (HarmonyRules::isValidChord(chord))
@@ -249,6 +253,38 @@ Chord voiceBass(const Note& bass, const ChordTemplate& tmpl,
     return Chord(soprano, alto, tenor, bass, tmpl);
 }
 
+// ── canonical template name ───────────────────────────────────────────────────
+
+// Mirrors Chord::getName() but operates on ChordTemplate directly.
+// Returns "" for unrecognised degree or type.
+std::string getTemplateName(const ChordTemplate& tmpl) {
+    if (tmpl.type == ChordType::CadentialSixFour) return "K64";
+
+    std::string typeStr;
+    switch (tmpl.type) {
+        case ChordType::Triad:      typeStr = "53"; break;
+        case ChordType::Six:        typeStr = "6";  break;
+        case ChordType::SixFour:    typeStr = "64"; break;
+        case ChordType::Seventh:    typeStr = "7";  break;
+        case ChordType::SixFive:    typeStr = "65"; break;
+        case ChordType::FourThree:  typeStr = "43"; break;
+        case ChordType::Two:        typeStr = "2";  break;
+        case ChordType::Ninth:      typeStr = "9";  break;
+        default: return "";
+    }
+
+    switch (tmpl.degree) {
+        case 1: return "T"   + typeStr;
+        case 2: return "II"  + typeStr;
+        case 3: return "III" + typeStr;
+        case 4: return "S"   + typeStr;
+        case 5: return "D"   + typeStr;
+        case 6: return "VI"  + typeStr;
+        case 7: return "VII" + typeStr;
+        default: return "";
+    }
+}
+
 } // namespace
 
 // ── public ────────────────────────────────────────────────────────────────────
@@ -279,6 +315,22 @@ std::vector<Chord> ChordBuilder::buildForFixedBassNote(const Note& bassNote,
         }
     }
     return chords;
+}
+
+std::vector<Chord> ChordBuilder::buildAllValid(const HarmonizationSettings& settings) {
+    auto templates = getAllowedTemplates(settings);
+    std::vector<Chord> result;
+    for (const auto& tmpl : templates) {
+        const int bassDeg = tmpl.degreesInSatbOrder[3];
+        auto bpc = degreeToNote(bassDeg, settings.key, settings.scaleModes);
+        auto bassNotes = fitAllInRange(bpc.name, bpc.alter, bassDeg,
+                                       BASS_RANGE, BASS_RANGE.max.getSemitone());
+        for (const Note& bass : bassNotes) {
+            auto variants = voiceBassChords(bass, tmpl, settings.key, settings.scaleModes);
+            result.insert(result.end(), variants.begin(), variants.end());
+        }
+    }
+    return result;
 }
 
 bool ChordBuilder::canUseTemplate(const ChordTemplate& chordTemplate,
@@ -325,34 +377,11 @@ std::vector<ChordTemplate> ChordBuilder::getAllowedTemplates(
     auto allTemplates = ChordTemplateLibrary::createAllTemplates();
     std::vector<ChordTemplate> allowed;
     for (const auto& tmpl : allTemplates) {
-        for (const auto& name : settings.allowedChords) {
-            if (templateMatchesAllowedName(tmpl, name)) {
-                allowed.push_back(tmpl);
-                break;
-            }
+        const std::string name = getTemplateName(tmpl);
+        if (name.empty()) continue;
+        for (const auto& a : settings.allowedChords) {
+            if (name == a) { allowed.push_back(tmpl); break; }
         }
     }
     return allowed;
-}
-
-bool ChordBuilder::templateMatchesAllowedName(const ChordTemplate& tmpl,
-                                              const std::string& chordName) const {
-    char funcChar;
-    switch (tmpl.function) {
-        case HarmonicFunction::T: funcChar = 'T'; break;
-        case HarmonicFunction::S: funcChar = 'S'; break;
-        case HarmonicFunction::D: funcChar = 'D'; break;
-        default: return false;
-    }
-
-    std::string typeStr;
-    switch (tmpl.type) {
-        case ChordType::Triad:   typeStr = "53"; break;
-        case ChordType::Six:     typeStr = "6";  break;
-        case ChordType::SixFour: typeStr = "64"; break;
-        case ChordType::Seventh: typeStr = "7";  break;
-        default: return false;
-    }
-
-    return std::string(1, funcChar) + typeStr == chordName;
 }

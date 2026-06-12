@@ -14,7 +14,7 @@ static HarmonizationSettings makeSettings(const std::string& key = "C") {
 
 // Note with no alter; degree must be set explicitly for ChordBuilder to accept it.
 static Note makeNote(NoteName name, int octave, int degree, int alter = 0) {
-    return Note(name, octave, alter, degree, Duration{}, false);
+    return Note(name, octave, alter, degree, 4, false);
 }
 
 // ── template constants (C major, triad/sixth with known voice layout) ─────────
@@ -335,6 +335,135 @@ TEST_CASE("ChordBuilder/buildForFixedBassNote: bass matches fixed note; all chor
         CHECK(chord.getBass().getName()   == NoteName::C);
         CHECK(chord.getBass().getOctave() == 3);
         CHECK(HarmonyRules::isValidChord(chord));
+    }
+}
+
+// ── Voice-order tests (regression: fitInRange fallback must not produce crossing) ─
+
+// T53_I_WIDE has alto=degree 3 (E in C major). With soprano=C4(48), the lowest E
+// in ALTO_RANGE is E4(52) which is above soprano. Before the fix, fitInRange
+// fallback returned E4 silently, producing alto > soprano. After the fix the
+// template must be rejected and the function must return empty.
+TEST_CASE("ChordBuilder/melody: returns empty when alto cannot be placed ≤ soprano",
+          "[ChordBuilder][melody][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+    // C4 is the lowest valid soprano. T53_I_WIDE needs alto=E; E4(52) > C4(48).
+    Note soprano = makeNote(NoteName::C, 4, 1);
+
+    auto chords = builder.createChordsFromTemplate(
+        soprano, T53_I_WIDE, HarmonizationMode::HarmonizeMelody, settings);
+
+    // This template cannot be voiced with soprano=C4 without voice crossing → must be empty.
+    CHECK(chords.empty());
+}
+
+TEST_CASE("ChordBuilder/melody: alto never above soprano in buildForFixedMelodyNote",
+          "[ChordBuilder][melody][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+
+    // Exercise the full range of soprano pitches to catch any surviving crossing.
+    const std::vector<std::pair<NoteName,int>> sopranoPitches = {
+        {NoteName::C, 4}, {NoteName::D, 4}, {NoteName::E, 4}, {NoteName::G, 4},
+        {NoteName::C, 5}, {NoteName::E, 5}, {NoteName::G, 5},
+    };
+    for (auto [name, oct] : sopranoPitches) {
+        Note soprano = makeNote(name, oct, 1);
+        auto chords = builder.buildForFixedMelodyNote(soprano, settings);
+        for (const auto& chord : chords) {
+            INFO("soprano=" << oct << " alto semitone=" << chord.getAlto().getSemitone()
+                 << " soprano semitone=" << chord.getSoprano().getSemitone());
+            CHECK(chord.getAlto().getSemitone() <= chord.getSoprano().getSemitone());
+        }
+    }
+}
+
+TEST_CASE("ChordBuilder/melody: tenor never above alto in buildForFixedMelodyNote",
+          "[ChordBuilder][melody][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+
+    const std::vector<std::pair<NoteName,int>> sopranoPitches = {
+        {NoteName::C, 4}, {NoteName::E, 4}, {NoteName::G, 4},
+        {NoteName::C, 5}, {NoteName::E, 5}, {NoteName::G, 5},
+    };
+    for (auto [name, oct] : sopranoPitches) {
+        Note soprano = makeNote(name, oct, 1);
+        auto chords = builder.buildForFixedMelodyNote(soprano, settings);
+        for (const auto& chord : chords) {
+            CHECK(chord.getTenor().getSemitone() <= chord.getAlto().getSemitone());
+        }
+    }
+}
+
+TEST_CASE("ChordBuilder/melody: bass never above tenor in buildForFixedMelodyNote",
+          "[ChordBuilder][melody][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+
+    const std::vector<std::pair<NoteName,int>> sopranoPitches = {
+        {NoteName::C, 4}, {NoteName::E, 4}, {NoteName::C, 5}, {NoteName::G, 5},
+    };
+    for (auto [name, oct] : sopranoPitches) {
+        Note soprano = makeNote(name, oct, 1);
+        auto chords = builder.buildForFixedMelodyNote(soprano, settings);
+        for (const auto& chord : chords) {
+            CHECK(chord.getBass().getSemitone() <= chord.getTenor().getSemitone());
+        }
+    }
+}
+
+TEST_CASE("ChordBuilder/bass: soprano never below alto in buildForFixedBassNote",
+          "[ChordBuilder][bass][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+
+    const std::vector<std::pair<NoteName,int>> bassPitches = {
+        {NoteName::E, 2}, {NoteName::G, 2}, {NoteName::C, 3},
+        {NoteName::E, 3}, {NoteName::G, 3}, {NoteName::C, 4},
+    };
+    for (auto [name, oct] : bassPitches) {
+        Note bass = makeNote(name, oct, 1);
+        auto chords = builder.buildForFixedBassNote(bass, settings);
+        for (const auto& chord : chords) {
+            CHECK(chord.getSoprano().getSemitone() >= chord.getAlto().getSemitone());
+        }
+    }
+}
+
+TEST_CASE("ChordBuilder/bass: alto never below tenor in buildForFixedBassNote",
+          "[ChordBuilder][bass][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+
+    const std::vector<std::pair<NoteName,int>> bassPitches = {
+        {NoteName::E, 2}, {NoteName::G, 2}, {NoteName::C, 3},
+        {NoteName::E, 3}, {NoteName::G, 3}, {NoteName::C, 4},
+    };
+    for (auto [name, oct] : bassPitches) {
+        Note bass = makeNote(name, oct, 1);
+        auto chords = builder.buildForFixedBassNote(bass, settings);
+        for (const auto& chord : chords) {
+            CHECK(chord.getAlto().getSemitone() >= chord.getTenor().getSemitone());
+        }
+    }
+}
+
+TEST_CASE("ChordBuilder/bass: tenor never below bass in buildForFixedBassNote",
+          "[ChordBuilder][bass][voice-order]") {
+    ChordBuilder builder;
+    auto settings = makeSettings();
+
+    const std::vector<std::pair<NoteName,int>> bassPitches = {
+        {NoteName::E, 2}, {NoteName::C, 3}, {NoteName::G, 3}, {NoteName::C, 4},
+    };
+    for (auto [name, oct] : bassPitches) {
+        Note bass = makeNote(name, oct, 1);
+        auto chords = builder.buildForFixedBassNote(bass, settings);
+        for (const auto& chord : chords) {
+            CHECK(chord.getTenor().getSemitone() >= chord.getBass().getSemitone());
+        }
     }
 }
 

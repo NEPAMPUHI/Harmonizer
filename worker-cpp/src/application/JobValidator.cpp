@@ -1,12 +1,14 @@
 #include "application/JobValidator.h"
 #include <cctype>
 #include <stdexcept>
+#include <unordered_set>
 
 void JobValidator::validate(const HarmonizationJob& job) const {
     validateCommonFields(job);
     validateSettings(job.settings, job.mode);
     validateInput(job);
-    validateAllowedChords(job.settings.allowedChords);
+    if (job.mode != HarmonizationMode::CheckSolution)
+        validateAllowedChords(job.settings.allowedChords);
 }
 
 void JobValidator::validateCommonFields(const HarmonizationJob& job) const {
@@ -83,16 +85,14 @@ void JobValidator::validateInput(const HarmonizationJob& job) const {
 
 void JobValidator::validateNotes(const ScoreInput& input) const {
     for (const auto& note : input.notes) {
-        if (note.getOctave() < 0 || note.getOctave() > 8)
-            throw std::runtime_error("Invalid note octave");
-
-        const Duration d = note.getDuration();
-        if (d.denominator <= 0 || d.numerator <= 0)
-            throw std::runtime_error("Invalid note duration");
-        int sixteenths = d.numerator * 16 / d.denominator;
+        const int sixteenths = note.getDurationSixteenths();
         if (sixteenths <= 0 || sixteenths > 64)
             throw std::runtime_error("Invalid note duration");
 
+        if (note.isRest()) continue;
+
+        if (note.getOctave() < 0 || note.getOctave() > 8)
+            throw std::runtime_error("Invalid note octave");
         if (note.getAlter() < -2 || note.getAlter() > 2)
             throw std::runtime_error("Invalid note alteration");
     }
@@ -104,16 +104,6 @@ void JobValidator::validateAllowedChords(const std::vector<std::string>& allowed
     for (const auto& chordName : allowedChords) {
         if (chordName.empty())
             throw std::runtime_error("Chord name is empty");
-        if (!isSupportedChordName(chordName))
-            throw std::runtime_error("Unsupported chord name");
     }
-}
-
-bool JobValidator::isSupportedChordName(const std::string& chordName) const {
-    static const std::unordered_set<std::string> supported = {
-        "T53", "T6", "T64",
-        "S53", "S6", "S64",
-        "D53", "D6", "D64", "D7"
-    };
-    return supported.count(chordName) > 0;
+    // Unknown chord names are silently skipped by ChordBuilder::templateMatchesAllowedName.
 }

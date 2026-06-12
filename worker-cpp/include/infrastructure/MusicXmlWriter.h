@@ -9,13 +9,21 @@
 
 class MusicXmlWriter {
 public:
-    std::string writePlaceholderScoreToString(const std::string& jobId, const std::string& variantId) const;
-    std::string writeInputMelodyToString(const HarmonizationJob& job, const std::string& variantId) const;
-    std::string writeScoreToString(const Score& score, const std::string& jobId, const std::string& variantId) const;
+    std::string writePlaceholderScoreToString(const std::string& jobId,
+                                              const std::string& variantId) const;
+    std::string writeInputMelodyToString(const HarmonizationJob& job,
+                                         const std::string& variantId) const;
+    std::string writeScoreToString(const Score& score,
+                                   const HarmonizationSettings& settings,
+                                   const std::string& jobId,
+                                   const std::string& variantId) const;
 
 private:
     std::string writeNote(const Note& note) const;
     std::string writeNoteWithDuration(const Note& note, int durationSixteenths) const;
+    std::string writeSatbNote(const Note& note, int durationSixteenths,
+                              int voice, const std::string& stem,
+                              bool tieStop = false, bool tieStart = false) const;
     std::string noteNameToMusicXmlStep(NoteName name) const;
     int getMeasureCapacitySixteenths(const TimeSignature& timeSignature) const;
     int getNoteDurationSixteenths(const Note& note) const;

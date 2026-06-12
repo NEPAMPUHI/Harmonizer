@@ -2,7 +2,7 @@
 #include "domain/Note.h"
 
 static Note makeNote(NoteName name, int octave, int alter = 0) {
-    return Note(name, octave, alter, 1, Duration{}, true);
+    return Note(name, octave, alter, 1, 4, true);
 }
 
 TEST_CASE("Note::getSemitone returns correct values for naturals", "[Note]") {
@@ -76,4 +76,20 @@ TEST_CASE("Note enharmonic equality: C#4 == Db4", "[Note]") {
     Note cSharp = makeNote(NoteName::C, 4,  1);
     Note dFlat  = makeNote(NoteName::D, 4, -1);
     REQUIRE(cSharp == dFlat);
+}
+
+TEST_CASE("Note::getDurationSixteenths returns stored value", "[Note][duration]") {
+    auto make = [](int dur) {
+        return Note(NoteName::C, 4, 0, 1, dur, false);
+    };
+    CHECK(make(16).getDurationSixteenths() == 16); // whole
+    CHECK(make( 8).getDurationSixteenths() ==  8); // half
+    CHECK(make( 4).getDurationSixteenths() ==  4); // quarter
+    CHECK(make( 2).getDurationSixteenths() ==  2); // eighth
+    CHECK(make( 1).getDurationSixteenths() ==  1); // sixteenth
+}
+
+TEST_CASE("Note: default durationSixteenths is 4 (quarter)", "[Note][duration]") {
+    Note n;
+    CHECK(n.getDurationSixteenths() == 4);
 }

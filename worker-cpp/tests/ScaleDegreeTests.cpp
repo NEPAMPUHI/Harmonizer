@@ -3,7 +3,7 @@
 #include "harmonization/ChordBuilder.h"
 
 static Note makeNote(NoteName name, int alter = 0) {
-    return Note(name, 4, alter, 0, Duration{4, 16}, false);
+    return Note(name, 4, alter, 0, 4, false);
 }
 
 static HarmonizationSettings makeSettings(const std::string& key) {

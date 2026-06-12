@@ -13,7 +13,7 @@ static HarmonizationSettings makeSettings(const std::string& key) {
 }
 
 static HarmonicPosition makePosition(NoteName name, int alter = 0) {
-    Note n(name, 4, alter, 0, Duration{4, 16}, false);
+    Note n(name, 4, alter, 0, 4, false);
     HarmonicPosition pos{};
     pos.fixedNote = n;
     return pos;

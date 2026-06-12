@@ -17,6 +17,8 @@ struct HarmonizationSettings {
     int anacrusisSixteenths;
     std::vector<std::string> forbiddenRules;
     std::vector<std::string> allowedChords;
+    bool splitLongNotesByBasePulse  = false;
+    int  maxHarmonicRhythmPlans     = 16;
 };
 
 #endif

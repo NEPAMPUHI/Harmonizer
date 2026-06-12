@@ -3,7 +3,6 @@
 
 #include <string>
 #include <vector>
-#include <unordered_set>
 #include "domain/HarmonizationJob.h"
 #include "domain/HarmonizationSettings.h"
 #include "domain/ScoreInput.h"
@@ -21,7 +20,6 @@ private:
     void validateInput(const HarmonizationJob& job) const;
     void validateNotes(const ScoreInput& input) const;
     void validateAllowedChords(const std::vector<std::string>& allowedChords) const;
-    bool isSupportedChordName(const std::string& chordName) const;
 };
 
 #endif

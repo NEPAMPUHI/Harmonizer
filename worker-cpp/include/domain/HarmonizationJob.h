@@ -3,6 +3,7 @@
 
 #include "HarmonizationSettings.h"
 #include "ScoreInput.h"
+#include "CheckSolutionInput.h"
 #include <string>
 
 enum class HarmonizationMode {
@@ -15,7 +16,8 @@ struct HarmonizationJob {
     std::string jobId;
     HarmonizationMode mode;
     HarmonizationSettings settings;
-    ScoreInput input;
+    ScoreInput input;                      // harmonize_melody / harmonize_bass
+    CheckSolutionInput checkSolutionInput; // check_solution
 };
 
 #endif

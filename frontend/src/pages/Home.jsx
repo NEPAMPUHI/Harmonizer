@@ -4,8 +4,8 @@ import NoteToolbar from '../NoteToolbar'
 import { canAdd, canAddTriplet, measureCapacity, noteTicks, usedTicks, NOTE_TICKS } from '../capacity'
 import { DEFAULT_TONALITY } from '../tonalities'
 import { getKeyAccidentals, getEffectiveSemitones } from '../pitchUtils'
-import { downloadScoreJson, scoreToJson } from '../scoreToJson'
-import { harmonizeScore, submitWorkerJob } from '../api'
+import { downloadScoreJson } from '../scoreToJson'
+import { submitJob, pollJobResult, workerResultToVariants } from '../api'
 import { buildWorkerRequest } from '../workerRequest'
 import { usePlayback, getPlaybackBpm } from '../usePlayback'
 import { exportSvgToPng } from '../exportPng'
@@ -40,7 +40,7 @@ const FORBIDDEN_RULES = [
 ]
 
 const ALLOWED_CHORDS = [
-  'T53', 'S53', 'D53', 'К64', 'T6', 'S6', 'D6', 'T64', 'S64', 'D64',
+  'T53', 'S53', 'D53', 'K64', 'T6', 'S6', 'D6', 'T64', 'S64', 'D64',
   'D7', 'D65', 'D43', 'D2',
   'II53', 'II6', 'VI53', 'II7', 'II65', 'II43', 'II2',
   'VII7', 'VII65', 'VII43', 'VII2',
@@ -423,7 +423,8 @@ export default function Home() {
   const resultStaffRef  = useRef(null)
 
   // ── Check mode ───────────────────────────────────────────────────
-  const [isChecking, setIsChecking] = useState(false)
+  const [isChecking,   setIsChecking]   = useState(false)
+  const [checkErrors,  setCheckErrors]  = useState(null)  // null=not checked, []|[...]=result
 
   // ── Scale modes (harmonize mode) ────────────────────────────────
   const [selectedModes, setSelectedModes] = useState(['natural', 'harmonic', 'melodic'])
@@ -460,7 +461,7 @@ export default function Home() {
     timeSignature,
     tonality,
     anacruisTicks,
-    mode:       isResultsMode ? 'harmonize' : mode,
+    mode:       isResultsMode ? 'check' : mode,
     audioClef:  isResultsMode ? null : (mode === 'harmonize' ? clefMode : null),
     bpm: getPlaybackBpm(timeSignature, playbackSpeedMode),
   })
@@ -1692,15 +1693,17 @@ export default function Home() {
     setUiState('harmonizingLoading')
     setHarmonizeError(null)
     try {
-      const scoreJson  = scoreToJson({ measures, timeSignature, tonality, anacruisTicks, selectedModes })
-      const workerReq  = buildWorkerRequest('harmonize_melody', {
+      const workerMode = clefMode === 'bass' ? 'harmonize_bass' : 'harmonize_melody'
+      const workerReq = buildWorkerRequest(workerMode, {
         measures, timeSignature, tonality, anacruisTicks,
         selectedModes, selectedForbiddenRules, selectedAllowedChords,
       })
-      const [variants] = await Promise.all([
-        harmonizeScore(scoreJson),
-        submitWorkerJob(workerReq).catch(err => console.warn('[worker] submit failed:', err)),
-      ])
+      const { jobId }  = await submitJob(workerReq)
+      const workerData = await pollJobResult(jobId)
+      if (!workerData || workerData.status === 'error' || !workerData.results?.length) {
+        throw new Error(workerData?.errors?.[0]?.message ?? 'Не вдалося гармонізувати')
+      }
+      const variants = workerResultToVariants(workerData, tonality)
       setHarmonizeVariants(variants)
       setSelectedVariantIdx(0)
       setUiState('harmonizationResults')
@@ -1721,13 +1724,10 @@ export default function Home() {
   function selectVariantAndEdit() {
     const variant = harmonizeVariants[selectedVariantIdx]
     if (!variant) return
-    const annotated = variant.measures.map(m => ({
-      ...m,
-      treble: annotateForCheck(m.treble, 'soprano',  1),
-      bass:   annotateForCheck(m.bass,   'bass',    -1),
-    }))
+    // Measures already contain all 4 SATB voices with voice/stemDir/positionTick
+    // set by workerResultToVariants — load them directly into check mode.
     pushUndo()
-    setMeasures(annotated)
+    setMeasures(variant.measures)
     savedCheckMeasuresRef.current = null
     setHarmonizeVariants([])
     setHarmonizeError(null)
@@ -1754,12 +1754,16 @@ export default function Home() {
 
   async function requestCheck() {
     setIsChecking(true)
+    setCheckErrors(null)
     try {
       const workerReq = buildWorkerRequest('check_solution', {
         measures, timeSignature, tonality, anacruisTicks,
         selectedModes, selectedForbiddenRules, selectedAllowedChords,
       })
-      await submitWorkerJob(workerReq)
+      const { jobId } = await submitJob(workerReq)
+      const result    = await pollJobResult(jobId)
+      console.log('[worker] check_solution response:', result)
+      setCheckErrors(result?.errors ?? [])
     } catch (err) {
       console.error('[worker] check failed:', err)
     } finally {
@@ -1997,7 +2001,19 @@ export default function Home() {
                       <button className="dl-menu-item" onClick={handleDownloadPng}>
                         PNG
                       </button>
-                      <button className="dl-menu-item" onClick={() => { window.open(harmonizeVariants[selectedVariantIdx]?.downloadUrl); setDlDropdownOpen(false) }}>
+                      <button className="dl-menu-item" onClick={() => {
+                        const xml = harmonizeVariants[selectedVariantIdx]?.musicXml
+                        if (xml) {
+                          const blob = new Blob([xml], { type: 'application/xml' })
+                          const url  = URL.createObjectURL(blob)
+                          const a    = Object.assign(document.createElement('a'), {
+                            href: url, download: `${harmonizeVariants[selectedVariantIdx].id}.musicxml`,
+                          })
+                          a.click()
+                          URL.revokeObjectURL(url)
+                        }
+                        setDlDropdownOpen(false)
+                      }}>
                         MusicXML
                       </button>
                     </div>
@@ -2060,6 +2076,7 @@ export default function Home() {
             currentTick={currentTick}
             totalTicks={totalTicks}
             playbackState={playbackState}
+            checkErrors={mode === 'check' ? checkErrors : null}
           />
         )}
 
@@ -2067,6 +2084,21 @@ export default function Home() {
           <div className="harmonize-loading">
             <span className="harmonize-spinner" />
             Гармонізую мелодію…
+          </div>
+        )}
+
+        {isChecking && (
+          <div className="harmonize-loading">
+            <span className="harmonize-spinner" />
+            Перевіряємо задачу…
+          </div>
+        )}
+
+        {mode === 'check' && !isChecking && checkErrors !== null && (
+          <div className={`check-result-banner${checkErrors.length === 0 ? ' check-result-ok' : ' check-result-fail'}`}>
+            {checkErrors.length === 0
+              ? '✓ Помилок не виявлено'
+              : `Знайдено помилок: ${checkErrors.length}`}
           </div>
         )}
 
@@ -2083,6 +2115,8 @@ export default function Home() {
               onSelectNote={() => {}}
               onSetNotePitch={() => {}}
               showBass={true}
+              isCheckMode={true}
+              showChordNames={true}
               currentTick={currentTick}
               totalTicks={totalTicks}
               playbackState={playbackState}

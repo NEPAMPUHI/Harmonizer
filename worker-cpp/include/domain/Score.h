@@ -9,6 +9,10 @@ struct Score {
     std::vector<Chord> chords;
     std::vector<HarmonicPosition> positions;
 
+    // 0 = soprano (melody mode), 3 = bass (bass mode), -1 = unset.
+    // Used by serializers to place MusicXML ties on the correct voice.
+    int fixedVoiceIndex = -1;
+
     bool empty() const;
 };
 

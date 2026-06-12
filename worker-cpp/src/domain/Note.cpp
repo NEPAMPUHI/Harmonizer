@@ -6,13 +6,16 @@ Interval::Interval(IntervalQuality quality, int number) : quality(quality), numb
 
 Note::Note() = default;
 
-Note::Note(NoteName name, int octave, int alter, int degree, Duration duration, bool isStrongBeat)
+Note::Note(NoteName name, int octave, int alter, int degree, int durationSixteenths, bool isStrongBeat,
+           bool tiedToNext, bool rest)
     : name(name),
       octave(octave),
       alter(alter),
       degree(degree),
-      duration(duration),
-      isStrongBeat(isStrongBeat) {}
+      durationSixteenths(durationSixteenths),
+      isStrongBeat(isStrongBeat),
+      tiedToNext(tiedToNext),
+      rest(rest) {}
 
 NoteName Note::getName() const {
     return name;
@@ -42,12 +45,20 @@ void Note::setScaleRelation(ScaleRelation r) {
     scaleRelation = r;
 }
 
-Duration Note::getDuration() const {
-    return duration;
+int Note::getDurationSixteenths() const {
+    return durationSixteenths;
 }
 
 bool Note::getBeat() const {
     return isStrongBeat;
+}
+
+bool Note::isTiedToNext() const {
+    return tiedToNext;
+}
+
+bool Note::isRest() const {
+    return rest;
 }
 
 int Note::getSemitone() const {

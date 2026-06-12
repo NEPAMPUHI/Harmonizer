@@ -5,6 +5,7 @@
 #include "domain/HarmonizationJob.h"
 #include "domain/HarmonizationSettings.h"
 #include "domain/ScoreInput.h"
+#include "domain/CheckSolutionInput.h"
 #include <nlohmann/json.hpp>
 
 class JobParser {
@@ -15,8 +16,14 @@ public:
 private:
     HarmonizationSettings parseSettings(const nlohmann::json& settingsJson, HarmonizationMode mode) const;
     TimeSignature parseTimeSignature(const nlohmann::json& timeSignatureJson) const;
-    ScoreInput parseInput(const nlohmann::json& inputJson, HarmonizationMode mode) const;
-    Note parseNote(const nlohmann::json& noteJson) const;
+
+    // harmonize_melody / harmonize_bass
+    ScoreInput    parseInput(const nlohmann::json& inputJson, HarmonizationMode mode) const;
+    Note          parseNote(const nlohmann::json& noteJson) const;
+
+    // check_solution
+    CheckSolutionInput parseCheckSolutionInput(const nlohmann::json& inputJson) const;
+    Note               parseCheckNote(const nlohmann::json& noteJson) const;
 };
 
 #endif

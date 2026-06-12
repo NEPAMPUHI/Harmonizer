@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 #include "infrastructure/JobParser.h"
 #include "harmonization/MelodyHarmonizer.h"
 #include "harmonization/BassHarmonizer.h"
@@ -6,6 +7,7 @@
 #include "harmonization/ChordBuilder.h"
 #include "harmonization/ScaleDegreeCalculator.h"
 #include "domain/HarmonicPositionBuilder.h"
+#include "harmonization/HarmonicRhythmPlanner.h"
 #include "domain/HarmonyRules.h"
 
 static HarmonizationSettings makePipelineSettings() {
@@ -182,6 +184,30 @@ static constexpr const char* BASS_LOWERED_VII_C_JSON = R"({
   ]}
 })";
 
+// 4/4, G4-G4-G4-C5: G4 (degree 5) on beats 1+3 (strong) makes D64/T64 candidate nodes;
+// the beat rule must block them. Beat 2 (weak) may keep SixFour.
+static constexpr const char* SIXFOUR_BEAT_RULE_JSON = R"({
+  "jobId": "test_sixfour_beat_rule",
+  "mode": "harmonize_melody",
+  "settings": {
+    "key": "C",
+    "scaleMode": ["natural", "harmonic", "melodic"],
+    "measureCount": 1,
+    "timeSignature": { "beats": 4, "beatType": 4 },
+    "anacrusisSixteenths": 0,
+    "forbiddenRules": ["s_after_d"],
+    "allowedChords": ["T53", "T6", "T64", "S53", "S6", "D53", "D6", "D7", "D64"]
+  },
+  "input": {
+    "notes": [
+      { "step": "G", "octave": 4, "alter": 0, "durationSixteenths": 4 },
+      { "step": "G", "octave": 4, "alter": 0, "durationSixteenths": 4 },
+      { "step": "G", "octave": 4, "alter": 0, "durationSixteenths": 4 },
+      { "step": "C", "octave": 5, "alter": 0, "durationSixteenths": 4 }
+    ]
+  }
+})";
+
 // ── Parse stage ───────────────────────────────────────────────────────────────
 
 TEST_CASE("Pipeline/melody: JSON parses without error", "[pipeline][parse]") {
@@ -230,8 +256,10 @@ TEST_CASE("Pipeline/melody: NoteDegreesResolver assigns non-zero degrees", "[pip
     JobParser parser;
     auto job = parser.parse(MELODY_JSON);
 
+    HarmonicRhythmPlanner planner;
     HarmonicPositionBuilder builder;
-    auto positions = builder.build(job.input, job.settings, HarmonizationMode::HarmonizeMelody);
+    auto segments  = planner.buildSegments(job.input.notes, job.settings);
+    auto positions = builder.build(segments, job.settings, HarmonizationMode::HarmonizeMelody);
 
     NoteDegreesResolver resolver;
     resolver.resolveInPlace(positions, job.settings);
@@ -247,8 +275,10 @@ TEST_CASE("Pipeline/bass: NoteDegreesResolver assigns non-zero degrees", "[pipel
     JobParser parser;
     auto job = parser.parse(BASS_JSON);
 
+    HarmonicRhythmPlanner planner;
     HarmonicPositionBuilder builder;
-    auto positions = builder.build(job.input, job.settings, HarmonizationMode::HarmonizeBass);
+    auto segments  = planner.buildSegments(job.input.notes, job.settings);
+    auto positions = builder.build(segments, job.settings, HarmonizationMode::HarmonizeBass);
 
     NoteDegreesResolver resolver;
     resolver.resolveInPlace(positions, job.settings);
@@ -288,7 +318,7 @@ TEST_CASE("Pipeline/melody: buildForFixedMelodyNote — soprano matches fixed no
           "[pipeline][chord-validity]") {
     ChordBuilder builder;
     auto settings = makePipelineSettings();
-    Note melody(NoteName::C, 5, 0, 1, Duration{}, false);
+    Note melody(NoteName::C, 5, 0, 1, 4, false);
 
     auto chords = builder.buildForFixedMelodyNote(melody, settings);
 
@@ -304,7 +334,7 @@ TEST_CASE("Pipeline/melody: buildForFixedMelodyNote — multiple chords per posi
           "[pipeline][chord-validity]") {
     ChordBuilder builder;
     auto settings = makePipelineSettings();
-    Note melody(NoteName::G, 4, 0, 5, Duration{}, false);
+    Note melody(NoteName::G, 4, 0, 5, 4, false);
 
     auto chords = builder.buildForFixedMelodyNote(melody, settings);
 
@@ -318,7 +348,7 @@ TEST_CASE("Pipeline/bass: buildForFixedBassNote — bass matches fixed note and 
           "[pipeline][chord-validity]") {
     ChordBuilder builder;
     auto settings = makePipelineSettings();
-    Note bassNote(NoteName::C, 3, 0, 1, Duration{}, false);
+    Note bassNote(NoteName::C, 3, 0, 1, 4, false);
 
     auto chords = builder.buildForFixedBassNote(bassNote, settings);
 
@@ -334,7 +364,7 @@ TEST_CASE("Pipeline/bass: buildForFixedBassNote — multiple chords per position
           "[pipeline][chord-validity]") {
     ChordBuilder builder;
     auto settings = makePipelineSettings();
-    Note bassNote(NoteName::G, 2, 0, 5, Duration{}, false);
+    Note bassNote(NoteName::G, 2, 0, 5, 4, false);
 
     auto chords = builder.buildForFixedBassNote(bassNote, settings);
 
@@ -359,7 +389,7 @@ TEST_CASE("Pipeline/lowered: C major Ab melody soprano — chords valid, identit
           "[pipeline][lowered][melody]") {
     ChordBuilder builder;
     auto settings = makePipelineSettingsForKey("C");
-    Note soprano(NoteName::A, 4, -1, 0, Duration{}, false);
+    Note soprano(NoteName::A, 4, -1, 0, 4, false);
     resolveNoteInPlace(soprano, settings);
 
     REQUIRE(soprano.getDegree() == 6);
@@ -380,7 +410,7 @@ TEST_CASE("Pipeline/lowered: C major Bb melody soprano — chords valid, identit
           "[pipeline][lowered][melody]") {
     ChordBuilder builder;
     auto settings = makePipelineSettingsForKey("C");
-    Note soprano(NoteName::B, 4, -1, 0, Duration{}, false);
+    Note soprano(NoteName::B, 4, -1, 0, 4, false);
     resolveNoteInPlace(soprano, settings);
 
     REQUIRE(soprano.getDegree() == 7);
@@ -401,7 +431,7 @@ TEST_CASE("Pipeline/lowered: G major Eb melody soprano — chords valid, identit
           "[pipeline][lowered][melody]") {
     ChordBuilder builder;
     auto settings = makePipelineSettingsForKey("G");
-    Note soprano(NoteName::E, 4, -1, 0, Duration{}, false);
+    Note soprano(NoteName::E, 4, -1, 0, 4, false);
     resolveNoteInPlace(soprano, settings);
 
     REQUIRE(soprano.getDegree() == 6);
@@ -422,7 +452,7 @@ TEST_CASE("Pipeline/lowered: G major F melody soprano (♭VII) — chords valid,
           "[pipeline][lowered][melody]") {
     ChordBuilder builder;
     auto settings = makePipelineSettingsForKey("G");
-    Note soprano(NoteName::F, 4, 0, 0, Duration{}, false);
+    Note soprano(NoteName::F, 4, 0, 0, 4, false);
     resolveNoteInPlace(soprano, settings);
 
     REQUIRE(soprano.getDegree() == 7);
@@ -443,7 +473,7 @@ TEST_CASE("Pipeline/lowered: C major Ab bass — chords valid, identity preserve
           "[pipeline][lowered][bass]") {
     ChordBuilder builder;
     auto settings = makePipelineSettingsForKey("C");
-    Note bass(NoteName::A, 3, -1, 0, Duration{}, false);
+    Note bass(NoteName::A, 3, -1, 0, 4, false);
     resolveNoteInPlace(bass, settings);
 
     REQUIRE(bass.getDegree() == 6);
@@ -464,7 +494,7 @@ TEST_CASE("Pipeline/lowered: C major Bb bass — chords valid, identity preserve
           "[pipeline][lowered][bass]") {
     ChordBuilder builder;
     auto settings = makePipelineSettingsForKey("C");
-    Note bass(NoteName::B, 2, -1, 0, Duration{}, false);
+    Note bass(NoteName::B, 2, -1, 0, 4, false);
     resolveNoteInPlace(bass, settings);
 
     REQUIRE(bass.getDegree() == 7);
@@ -565,4 +595,65 @@ TEST_CASE("Pipeline/lowered: C major Bb bass — full harmonizer produces varian
     std::vector<HarmonizationVariant> variants;
     REQUIRE_NOTHROW(variants = harmonizer.harmonize(job.input, job.settings));
     REQUIRE_FALSE(variants.empty());
+}
+
+// ── Beat rule: no SixFour on strong/medium beat ───────────────────────────────
+
+TEST_CASE("Pipeline/beat-rule: No SixFour chord on strong or medium beat in 4/4",
+          "[pipeline][beat-rule][SixFour]") {
+    JobParser parser;
+    auto job = parser.parse(SIXFOUR_BEAT_RULE_JSON);
+
+    MelodyHarmonizer harmonizer;
+    auto variants = harmonizer.harmonize(job.input, job.settings);
+    REQUIRE_FALSE(variants.empty());
+
+    for (const auto& variant : variants) {
+        const auto& chords    = variant.musicScore.chords;
+        const auto& positions = variant.musicScore.positions;
+        REQUIRE(chords.size() == positions.size());
+
+        for (size_t i = 0; i < chords.size(); ++i) {
+            if (positions[i].isStrongBeat || positions[i].isMediumBeat) {
+                CHECK(chords[i].getType() != ChordType::SixFour);
+            }
+        }
+    }
+}
+
+// ── durationSixteenths: JSON parsing round-trip ──────────────────────────────
+
+TEST_CASE("JobParser: durationSixteenths parsed correctly for all standard durations",
+          "[duration][parser]") {
+    JobParser parser;
+
+    auto makeNoteJson = [](int dur) -> std::string {
+        return R"({"step":"C","octave":4,"alter":0,"durationSixteenths":)" + std::to_string(dur) + "}";
+    };
+
+    using json = nlohmann::json;
+
+    const std::pair<int,int> cases[] = {
+        {16,  16},   // whole
+        { 8,   8},   // half
+        { 4,   4},   // quarter
+        { 2,   2},   // eighth
+        { 1,   1},   // sixteenth
+    };
+
+    for (auto [input, expected] : cases) {
+        auto j   = json::parse(makeNoteJson(input));
+        auto job = json::parse(R"({
+            "jobId":"t","mode":"harmonize_melody",
+            "settings":{"key":"C","scaleMode":["natural"],"measureCount":1,
+                        "timeSignature":{"beats":4,"beatType":4},
+                        "anacrusisSixteenths":0,
+                        "forbiddenRules":[],
+                        "allowedChords":["T53"]},
+            "input":{"notes":[)" + makeNoteJson(input) + R"(]}
+        })");
+        HarmonizationJob parsed = parser.parse(job.dump());
+        REQUIRE_FALSE(parsed.input.notes.empty());
+        CHECK(parsed.input.notes[0].getDurationSixteenths() == expected);
+    }
 }

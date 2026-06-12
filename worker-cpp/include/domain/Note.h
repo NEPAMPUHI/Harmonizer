@@ -15,11 +15,6 @@ enum class IntervalQuality {
     Minor
 };
 
-struct Duration {
-    int numerator = 1;
-    int denominator = 16;
-};
-
 struct Interval {
     int number;
     IntervalQuality quality;
@@ -34,13 +29,16 @@ private:
     int alter = 0;   // -2, -1, 0, 1, 2
     int degree = 1;
     ScaleRelation scaleRelation = ScaleRelation::Natural;
-    Duration duration;
+    int durationSixteenths = 4;
     bool isStrongBeat = true;
+    bool tiedToNext = false;
+    bool rest = false;
 
 public:
     Note();
 
-    Note(NoteName name, int octave, int alter, int degree, Duration duration, bool isStrongBeat);
+    Note(NoteName name, int octave, int alter, int degree, int durationSixteenths, bool isStrongBeat,
+         bool tiedToNext = false, bool rest = false);
 
     NoteName getName() const;
     int getOctave() const;
@@ -49,8 +47,10 @@ public:
     void setDegree(int d);
     ScaleRelation getScaleRelation() const;
     void setScaleRelation(ScaleRelation r);
-    Duration getDuration() const;
+    int getDurationSixteenths() const;
     bool getBeat() const;
+    bool isTiedToNext() const;
+    bool isRest() const;
 
     int nameToInt() const;
     int getSemitone() const;

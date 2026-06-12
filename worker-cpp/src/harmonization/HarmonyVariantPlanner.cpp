@@ -32,7 +32,7 @@ int HarmonyVariantPlanner::calculateNodePriority(const HarmonyGraphNode& node) c
 
     switch (node.chord.getDegree()) {
         case 2: priority += 14; break;
-        case 3: priority += 20; break;
+        case 3: priority += 8; break;
         case 6: priority += 14; break;
         case 7: priority += 15; break;
         default: break;

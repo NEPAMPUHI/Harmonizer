@@ -48,20 +48,42 @@ function buildHarmonizeInput(measures, keyAcc, mode) {
   return { notes }
 }
 
-// check_solution: flat array of all non-rest, non-placeholder notes from both staves,
-// ordered by cumulative beat position across measures.
-function buildCheckInput(measures, keyAcc) {
-  const notes = []
-  for (const m of measures) {
-    for (const clef of ['treble', 'bass']) {
-      for (const note of m[clef] ?? []) {
-        if (note.deletionRest) continue
-        const serialized = serializeCppNote(note, keyAcc)
-        if (serialized) notes.push(serialized)
-      }
-    }
+// Serialize a single check-mode note to the worker format.
+// Triplet placeholders are excluded by the caller before reaching here.
+// Both real rests (isRest) and deletion-rest placeholders (deletionRest) are
+// serialized as rests — from the user's perspective they look identical.
+function serializeCheckNote(note, keyAcc) {
+  const durationSixteenths = Math.round(noteTicks(note))
+  if (note.isRest || note.deletionRest) {
+    return { durationSixteenths, isRest: true }
   }
-  return { notes }
+  return {
+    name:               note.pitch.toUpperCase(),
+    octave:             note.octave,
+    alter:              computeEffectiveAlter(note, keyAcc),
+    durationSixteenths,
+    isRest:             false,
+  }
+}
+
+// check_solution: serialize all four SATB voices per measure.
+// Notes are filtered by their voice tag and sorted by positionTick before
+// serialization, so the C++ engine receives them in score order.
+function buildCheckInput(measures, keyAcc) {
+  const voiceNotes = (clefNotes, voiceName) =>
+    (clefNotes ?? [])
+      .filter(n => n.voice === voiceName && !n.isTripletPlaceholder)
+      .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+      .map(n => serializeCheckNote(n, keyAcc))
+
+  return {
+    measures: measures.map(m => ({
+      soprano: voiceNotes(m.treble, 'soprano'),
+      alto:    voiceNotes(m.treble, 'alto'),
+      tenor:   voiceNotes(m.bass,   'tenor'),
+      bass:    voiceNotes(m.bass,   'bass'),
+    })),
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -125,18 +147,33 @@ export function buildWorkerRequest(workerMode, {
     input,
   }
 
-  // Debug: log the full worker request so every note's alter field can be inspected.
+  // Debug: log the full worker request.
   console.log('[worker] request JSON:', JSON.stringify(request, null, 2))
-  if (request.input.notes.length > 0) {
-    console.log('[worker] first note sample:', request.input.notes[0])
-    const missing = request.input.notes.filter(n => !Object.prototype.hasOwnProperty.call(n, 'alter'))
-    if (missing.length > 0) {
-      console.error('[worker] BUG: notes missing alter field:', missing)
-    } else {
-      console.log(`[worker] all ${request.input.notes.length} note(s) have alter ✓`)
-    }
+
+  if (workerMode === 'check_solution') {
+    const ms = request.input.measures ?? []
+    console.log(`[worker] check_solution: ${ms.length} measure(s)`)
+    ms.forEach((m, i) => {
+      console.log(
+        `  measure ${i}: S=${m.soprano.length} A=${m.alto.length}` +
+        ` T=${m.tenor.length} B=${m.bass.length}`,
+      )
+    })
   } else {
-    console.warn('[worker] input.notes is empty — no notes to harmonize')
+    const inputNotes = request.input.notes
+    if (Array.isArray(inputNotes)) {
+      if (inputNotes.length > 0) {
+        console.log('[worker] first note sample:', inputNotes[0])
+        const missing = inputNotes.filter(n => !Object.prototype.hasOwnProperty.call(n, 'alter'))
+        if (missing.length > 0) {
+          console.error('[worker] BUG: notes missing alter field:', missing)
+        } else {
+          console.log(`[worker] all ${inputNotes.length} note(s) have alter ✓`)
+        }
+      } else {
+        console.warn('[worker] input.notes is empty — no notes to harmonize')
+      }
+    }
   }
 
   return request

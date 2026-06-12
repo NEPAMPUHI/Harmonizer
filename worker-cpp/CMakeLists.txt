@@ -37,16 +37,23 @@ add_executable(harmonizer_worker
     src/domain/Chord.cpp
     src/domain/Score.cpp
     src/domain/HarmonyRules.cpp
+    src/domain/ActiveRuleSet.cpp
 
     src/harmonization/ScaleDegreeCalculator.cpp
     src/harmonization/ChordBuilder.cpp
     src/harmonization/NoteDegreesResolver.cpp
+    src/harmonization/HarmonicRhythmPlanner.cpp
+    src/harmonization/HarmonicRhythmValidator.cpp
     src/harmonization/HarmonicPositionBuilder.cpp
     src/harmonization/MelodyHarmonizer.cpp
     src/harmonization/BassHarmonizer.cpp
     src/harmonization/VariantScorer.cpp
     src/harmonization/HarmonyGraph.cpp
     src/harmonization/HarmonyVariantPlanner.cpp
+
+    src/checking/CheckHarmonicPositionBuilder.cpp
+    src/checking/CheckChordIdentifier.cpp
+    src/checking/CheckSolutionRuleChecker.cpp
 
     src/application/Worker.cpp
     src/application/TaskDispatcher.cpp
@@ -58,6 +65,7 @@ add_executable(harmonizer_worker
     src/infrastructure/Results.cpp
     src/infrastructure/ResultStorage.cpp
     src/infrastructure/MusicXmlWriter.cpp
+    src/infrastructure/ScoreSerializer.cpp
 
     src/data/ChordTemplateLibrary.cpp
 )
@@ -70,25 +78,58 @@ add_executable(harmonizer_tests
     src/domain/Chord.cpp
     src/domain/Score.cpp
     src/domain/HarmonyRules.cpp
+    src/domain/ActiveRuleSet.cpp
     src/harmonization/HarmonyGraph.cpp
     src/harmonization/ScaleDegreeCalculator.cpp
     src/harmonization/ChordBuilder.cpp
     src/harmonization/NoteDegreesResolver.cpp
+    src/harmonization/HarmonicRhythmPlanner.cpp
+    src/harmonization/HarmonicRhythmValidator.cpp
     src/harmonization/HarmonicPositionBuilder.cpp
     src/harmonization/MelodyHarmonizer.cpp
     src/harmonization/BassHarmonizer.cpp
     src/harmonization/VariantScorer.cpp
     src/harmonization/HarmonyVariantPlanner.cpp
     src/data/ChordTemplateLibrary.cpp
+    src/checking/CheckHarmonicPositionBuilder.cpp
+    src/checking/CheckChordIdentifier.cpp
+    src/checking/CheckSolutionRuleChecker.cpp
+    src/application/TaskDispatcher.cpp
+    src/application/HarmonizationEngine.cpp
+    src/application/JobValidator.cpp
     src/infrastructure/JobParser.cpp
+    src/infrastructure/Results.cpp
+    src/infrastructure/ResultStorage.cpp
+    src/infrastructure/MusicXmlWriter.cpp
+    src/infrastructure/ScoreSerializer.cpp
 
+    tests/HarmonicRhythmPlannerTests.cpp
+    tests/TiedNotesAndRestsTests.cpp
+    tests/SplitLongNotesTests.cpp
+    tests/CadenceSplitPatternTests.cpp
+    tests/HarmonicRhythmPlanTests.cpp
+    tests/MultiPlanIntegrationTests.cpp
+    tests/RhythmAwareRankingTests.cpp
+    tests/SegmentOutputTests.cpp
+    tests/HarmonicRhythmValidatorTests.cpp
     tests/NoteTests.cpp
     tests/ChordNameTests.cpp
     tests/HarmonyGraphTests.cpp
     tests/ScaleDegreeTests.cpp
     tests/NoteDegreesResolverTests.cpp
     tests/ChordBuilderTests.cpp
+    tests/HarmonyRulesTests.cpp
     tests/PipelineIntegrationTests.cpp
+    tests/ScoreSerializerTests.cpp
+    tests/VariantScorerTests.cpp
+    tests/CheckSolutionParserTests.cpp
+    tests/CheckHarmonicPositionBuilderTests.cpp
+    tests/CheckChordIdentifierTests.cpp
+    tests/CheckSolutionRuleCheckerTests.cpp
+    tests/CheckParallelIntervalTests.cpp
+    tests/CheckAllVoicesSameDirectionTests.cpp
+    tests/CheckNewDiagnosticsTests.cpp
+    tests/ForbiddenRulesTests.cpp
 )
 
 target_include_directories(harmonizer_tests PRIVATE include)

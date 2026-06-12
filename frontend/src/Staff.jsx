@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import CheckErrorsLayer from './CheckErrorsLayer'
 import {
   Renderer, Stave, StaveNote, GhostNote, Voice, Formatter, Beam, Tuplet,
   StaveConnector, BarlineType, Accidental, StaveTie, Dot,
@@ -14,6 +15,7 @@ const BASS_Y_HARMONIZE = 162   // was 92; +70 px (2 stem lengths) vs original
 const BASS_Y_CHECK     = 162   // intra-system gap treble↔bass = 102 px (3 stems); was 197 → −35 px
 const ROW_H_HARMONIZE  = 200   // original row height — no two-voice stem clash in harmonize
 const ROW_H_CHECK      = 305   // inter-system gap bass→treble_next = 123 px (3.5 stems); ROW_H−bassY−20
+const CHORD_LABEL_Y_OFFSET = 140  // px below bass stave top; clears downward stems of C2 and below
 
 // ── Dynamic first-measure width ─────────────────────────────────
 const ACC_COUNT = {
@@ -590,13 +592,50 @@ function computeCursorPosition(currentTick, stavesArr, measures, timeSignature, 
   return null
 }
 
+// ── Check-error layout map builder ──────────────────────────────
+// Maps positionIndex (C++ sequential index) → { soprano, alto, tenor, bass } → { x, y }
+// using the note positions recorded after VexFlow renders.
+function buildNoteLayoutMap(measures, notePositions) {
+  const posById = {}
+  notePositions.forEach(p => { posById[p.id] = p })
+
+  // Collect harmonic positions: unique positionTick per measure, sorted
+  const harmonicPositions = []
+  for (let mi = 0; mi < measures.length; mi++) {
+    const m = measures[mi]
+    const allNotes = [...(m.treble || []), ...(m.bass || [])]
+    const ticks = new Set(
+      allNotes
+        .filter(n => !n.isRest && n.voice && n.positionTick != null)
+        .map(n => n.positionTick)
+    )
+    ;[...ticks].sort((a, b) => a - b).forEach(tick => harmonicPositions.push({ mi, tick }))
+  }
+
+  const map = {}
+  harmonicPositions.forEach(({ mi, tick }, posIdx) => {
+    map[posIdx] = {}
+    const allNotes = [...(measures[mi].treble || []), ...(measures[mi].bass || [])]
+    for (const voice of ['soprano', 'alto', 'tenor', 'bass']) {
+      const note = allNotes.find(n => !n.isRest && n.voice === voice && n.positionTick === tick)
+      if (note && posById[note.id]) {
+        const p = posById[note.id]
+        map[posIdx][voice] = { x: p.svgX, y: p.svgY }
+      }
+    }
+  })
+  return map
+}
+
 // ── Component ───────────────────────────────────────────────────
 export default function Staff({
   measures, timeSignature, keySignature, drag, onDrop, anacruisTicks = 0,
   selectedNoteId, onSelectNote, onSetNotePitch, showBass = true, singleClef = 'treble',
   isTriplet = false, tripletCount = 0, pendingTriplet = null,
   onNoteDragStart, isCheckMode = false,
+  showChordNames = false,
   currentTick = 0, totalTicks = 0, playbackState = 'idle',
+  checkErrors = null,
 }) {
   const canvasRef  = useRef(null)
   const wrapperRef = useRef(null)
@@ -612,6 +651,7 @@ export default function Staff({
   const [preview,         setPreview]         = useState(null)
   const [isDraggingNote,  setIsDraggingNote]  = useState(false)
   const [containerW,      setContainerW]      = useState(0)
+  const [noteLayoutMap,   setNoteLayoutMap]   = useState(null)
 
   // ── Container-width tracking (drives adaptive row layout) ──────
   useEffect(() => {
@@ -1183,6 +1223,65 @@ export default function Staff({
           trackAndDraw(measure.treble.filter(n => n.stemDir === -1), dAlto,    tv2, tv2Beams, treble, 'treble', 'alto')
           trackAndDraw(measure.bass.filter(n => n.stemDir !== -1),   dTenor,   bv,  bvBeams,  bass,   'bass',   'tenor')
           trackAndDraw(measure.bass.filter(n => n.stemDir === -1),   dBassV,   bv2, bv2Beams, bass,   'bass',   'bass')
+
+          // ── Chord name labels ─────────────────────────────────────
+          if (showChordNames && measure.chordNames?.length) {
+            const svgEl = el.querySelector('svg')
+            if (svgEl) {
+              const names = measure.chordNames
+              const ticks = measure.chordTicks   // within-measure sixteenth positions
+
+              const addLabel = (name, svgX) => {
+                const labelY = rowY + bassY + CHORD_LABEL_Y_OFFSET
+                const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+                textEl.setAttribute('x', svgX)
+                textEl.setAttribute('y', labelY)
+                textEl.setAttribute('text-anchor', 'middle')
+                textEl.setAttribute('font-size', '10')
+                textEl.setAttribute('font-family', 'Arial, sans-serif')
+                textEl.setAttribute('fill', '#555')
+                textEl.setAttribute('class', 'chord-label')
+                textEl.textContent = name
+                svgEl.appendChild(textEl)
+              }
+
+              if (ticks?.length === names.length) {
+                // Position each label at its harmonic-position tick.
+                // Bass tick keys are populated by the tenor auto-rest recorder,
+                // covering all harmonic positions even when bass is merged to 1 note.
+                // Inside useCheckVoices, showBass is always true so bass != null.
+                const geoStart = bass.getNoteStartX()
+                const geoEnd   = bass.getNoteEndX()
+                const visible  = measure.chordLabelVisible
+                names.forEach((name, i) => {
+                  if (!name) return
+                  if (visible?.[i] === false) return
+                  const ct = ticks[i]
+                  // Level 1: real note X from bass stave (tenor auto-rest fills these)
+                  // Level 2: real note X from treble stave (alto auto-rest fills these)
+                  // Level 3: stave-geometry interpolation for fully-merged voices
+                  const x =
+                    tickPositionsRef.current[`${globalIdx}.bass.${ct}`]
+                    ?? tickPositionsRef.current[`${globalIdx}.treble.${ct}`]
+                    ?? (geoStart + (ct / mCap) * (geoEnd - geoStart))
+                  addLabel(name, x)
+                })
+              } else {
+                // Fallback: align labels to bass voice note index (pre-chordTicks behavior).
+                const bassNotes = measure.bass
+                  .filter(n => n.stemDir === -1 && !n.isRest)
+                  .sort((a, b) => (a.positionTick ?? 0) - (b.positionTick ?? 0))
+                const visibleFb = measure.chordLabelVisible
+                bassNotes.forEach((bn, i) => {
+                  const name = names[i]
+                  if (!name) return
+                  if (visibleFb?.[i] === false) return
+                  const x = tickPositionsRef.current[`${globalIdx}.bass.${bn.positionTick ?? 0}`]
+                  if (x != null) addLabel(name, x)
+                })
+              }
+            }
+          }
         } else {
           // Harmonize mode: single voice per stave, tie tracking active
           if (tv) {
@@ -1314,7 +1413,12 @@ export default function Staff({
       }
     }
 
-  }, [measures, timeSignature, keySignature, anacruisTicks, showBass, singleClef, containerW, selectedNoteId])
+    // ── Build note layout map for check-error overlay ──────────────
+    if (isCheckMode) {
+      setNoteLayoutMap(buildNoteLayoutMap(measures, notePositionsRef.current))
+    }
+
+  }, [measures, timeSignature, keySignature, anacruisTicks, showBass, singleClef, containerW, selectedNoteId, showChordNames])
 
   // ── Global mouse handlers for note drag (works outside wrapper) ─
   useEffect(() => {
@@ -1808,6 +1912,14 @@ export default function Staff({
       <div ref={canvasRef} className="staff-canvas" />
 
       <div ref={cursorRef} className="playback-cursor" style={{ display: 'none' }} />
+
+      {isCheckMode && (
+        <CheckErrorsLayer
+          errors={checkErrors}
+          noteLayoutMap={noteLayoutMap}
+          canvasRef={canvasRef}
+        />
+      )}
 
       {preview && (
         <div

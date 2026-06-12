@@ -25,7 +25,16 @@ void HarmonyGraph::buildNodes(const std::vector<std::vector<Chord>>& chordsByPos
     }
 }
 
-void HarmonyGraph::build(const std::vector<std::vector<Chord>>& chordsByPosition) {
+void HarmonyGraph::build(const std::vector<std::vector<Chord>>& chordsByPosition,
+                         const std::vector<HarmonicPosition>& positions) {
+    build(chordsByPosition, positions, ActiveRuleSet::allEnabled());
+}
+
+void HarmonyGraph::build(const std::vector<std::vector<Chord>>& chordsByPosition,
+                         const std::vector<HarmonicPosition>& positions,
+                         const ActiveRuleSet& rules) {
+    activeRules = rules;
+    harmonicPositions = positions;
     buildNodes(chordsByPosition);
     buildEdges();
     pruneDeadEnds();
@@ -39,9 +48,10 @@ void HarmonyGraph::buildEdges() {
 
     std::unordered_set<int> validStartIds;
     for (const HarmonyGraphNode& node : levels[0]) {
-        if (HarmonyRules::isValidChord(node.chord)) {
-            validStartIds.insert(node.nodeId);
-        }
+        bool valid = harmonicPositions.empty()
+            ? HarmonyRules::isValidChord(node.chord, activeRules)
+            : HarmonyRules::isValidChord(node.chord, harmonicPositions[0], activeRules);
+        if (valid) validStartIds.insert(node.nodeId);
     }
 
     for (int i = 0; i < static_cast<int>(levels.size()) - 1; ++i) {
@@ -49,7 +59,17 @@ void HarmonyGraph::buildEdges() {
             if (i == 0 && validStartIds.count(prev.nodeId) == 0) continue;
 
             for (const HarmonyGraphNode& curr : levels[i + 1]) {
-                if (HarmonyRules::isValidConnection(prev.chord, curr.chord)) {
+                if (!harmonicPositions.empty()
+                    && (i + 1) < static_cast<int>(harmonicPositions.size())
+                    && !HarmonyRules::isValidChord(curr.chord, harmonicPositions[i + 1], activeRules))
+                    continue;
+
+                bool connected = harmonicPositions.empty()
+                    ? HarmonyRules::isValidConnection(prev.chord, curr.chord, activeRules)
+                    : HarmonyRules::isValidConnection(prev.chord, curr.chord,
+                                                       harmonicPositions[i], harmonicPositions[i + 1],
+                                                       activeRules);
+                if (connected) {
                     edges.push_back({prev.nodeId, curr.nodeId});
                 }
             }

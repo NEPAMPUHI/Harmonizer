@@ -9,6 +9,8 @@
 #include "domain/ScoreInput.h"
 #include "domain/HarmonicPosition.h"
 #include "domain/HarmonicPositionBuilder.h"
+#include "harmonization/HarmonicRhythmPlanner.h"
+#include "harmonization/HarmonicRhythmPlan.h"
 #include "harmonization/ChordBuilder.h"
 #include "harmonization/HarmonyGraph.h"
 #include "harmonization/HarmonyVariantPlanner.h"
@@ -20,6 +22,11 @@ public:
                                                 const HarmonizationSettings& settings);
 
 private:
+    std::vector<HarmonizationVariant> harmonizePlan(
+        const HarmonicRhythmPlan& plan,
+        const HarmonizationSettings& settings,
+        int planIndex);
+
     std::vector<std::vector<Chord>> buildChordsByPosition(
         const std::vector<HarmonicPosition>& positions,
         const HarmonizationSettings& settings);
@@ -33,6 +40,7 @@ private:
     VariantScorer variantScorer;
     HarmonyGraph harmonyGraph;
     HarmonyVariantPlanner harmonyVariantPlanner;
+    HarmonicRhythmPlanner harmonicRhythmPlanner;
     HarmonicPositionBuilder harmonicPositionBuilder;
 };
 

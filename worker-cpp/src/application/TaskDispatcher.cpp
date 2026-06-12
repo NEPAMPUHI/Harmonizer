@@ -1,4 +1,9 @@
 #include "application/TaskDispatcher.h"
+#include "checking/CheckHarmonicPositionBuilder.h"
+#include "checking/CheckChordIdentifier.h"
+#include "checking/CheckSolutionRuleChecker.h"
+#include "domain/ActiveRuleSet.h"
+#include <iostream>
 #include <stdexcept>
 
 JobResult TaskDispatcher::process(const HarmonizationJob& job) {
@@ -23,6 +28,30 @@ JobResult TaskDispatcher::dispatchHarmonizeBass(const HarmonizationJob& job) {
 }
 
 JobResult TaskDispatcher::dispatchCheckSolution(const HarmonizationJob& job) {
-    // TODO: delegate to SolutionCheckingEngine once it is wired up
-    return JobResult::success(job.jobId);
+    const auto positions   = CheckHarmonicPositionBuilder{}.build(job.checkSolutionInput);
+    const auto identified  = CheckChordIdentifier{}.identify(positions, job.settings);
+    const auto rules       = ActiveRuleSet::fromSettings(job.settings);
+    const auto checkErrors = CheckSolutionRuleChecker{}.check(identified, rules);
+
+    // Debug — first 5 positions
+    const std::size_t limit = std::min(identified.size(), std::size_t{5});
+    for (std::size_t i = 0; i < limit; ++i) {
+        const auto& r = identified[i];
+        const auto& p = r.position;
+        std::cerr << "[check_solution] pos[" << i << "] m=" << p.measureIndex
+                  << " start=" << p.positionInMeasureSixteenths
+                  << " dur="   << p.durationSixteenths;
+        if (r.isKnownChord)
+            std::cerr << " chord=" << r.chord.getName();
+        else
+            std::cerr << " UNKNOWN S=" << p.hasSoprano << " A=" << p.hasAlto
+                      << " T=" << p.hasTenor << " B=" << p.hasBass;
+        std::cerr << '\n';
+    }
+    std::cerr << "[check_solution] " << checkErrors.size() << " diagnostic error(s)\n";
+
+    auto result         = JobResult::success(job.jobId);
+    result.mode         = "check_solution";
+    result.checkErrors  = checkErrors;
+    return result;
 }

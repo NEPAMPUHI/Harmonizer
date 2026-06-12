@@ -6,6 +6,8 @@
 #include <vector>
 #include "domain/Chord.h"
 #include "domain/HarmonyRules.h"
+#include "domain/HarmonicPosition.h"
+#include "domain/ActiveRuleSet.h"
 
 struct HarmonyGraphNode {
     int nodeId;
@@ -22,7 +24,11 @@ class HarmonyGraph {
 public:
     void clear();
     void buildNodes(const std::vector<std::vector<Chord>>& chordsByPosition);
-    void build(const std::vector<std::vector<Chord>>& chordsByPosition);
+    void build(const std::vector<std::vector<Chord>>& chordsByPosition,
+               const std::vector<HarmonicPosition>& positions);
+    void build(const std::vector<std::vector<Chord>>& chordsByPosition,
+               const std::vector<HarmonicPosition>& positions,
+               const ActiveRuleSet& rules);
     void buildEdges();
     void pruneDeadEnds();
 
@@ -45,6 +51,8 @@ private:
     std::vector<std::vector<HarmonyGraphNode>> levels;
     std::vector<HarmonyGraphEdge> edges;
     std::vector<std::unordered_set<std::string>> uniqueChordNamesByLevel;
+    std::vector<HarmonicPosition> harmonicPositions;
+    ActiveRuleSet activeRules;
     int nextNodeId = 0;
 };
 
