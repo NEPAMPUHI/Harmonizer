@@ -1698,8 +1698,11 @@ export default function Home() {
         measures, timeSignature, tonality, anacruisTicks,
         selectedModes, selectedForbiddenRules, selectedAllowedChords,
       })
+      console.log('[harmonize] submitting job, mode=', workerMode)
       const { jobId }  = await submitJob(workerReq)
+      console.log('[harmonize] jobId=', jobId, '— polling...')
       const workerData = await pollJobResult(jobId)
+      console.log('[harmonize] result:', workerData?.status, 'results:', workerData?.results?.length ?? 0, 'errors:', workerData?.errors)
       if (!workerData || workerData.status === 'error' || !workerData.results?.length) {
         throw new Error(workerData?.errors?.[0]?.message ?? 'Не вдалося гармонізувати')
       }
@@ -1708,6 +1711,7 @@ export default function Home() {
       setSelectedVariantIdx(0)
       setUiState('harmonizationResults')
     } catch (err) {
+      console.error('[harmonize] error:', err.message)
       setHarmonizeError(err.message)
       setHarmonizeVariants([])
       setUiState('editing')
@@ -2085,6 +2089,10 @@ export default function Home() {
             <span className="harmonize-spinner" />
             Гармонізую мелодію…
           </div>
+        )}
+
+        {uiState === 'editing' && harmonizeError && (
+          <div className="harmonize-error">{harmonizeError}</div>
         )}
 
         {isChecking && (
