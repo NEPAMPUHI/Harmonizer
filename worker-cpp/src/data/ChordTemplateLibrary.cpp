@@ -177,7 +177,7 @@ void ChordTemplateLibrary::addS53(std::vector<ChordTemplate>& templates) {
             ChordType::Triad,
             Inversion::V,
             ChordPosition::Close,
-            {1, 6, 4, 1}
+            {1, 6, 4, 4}
         },
 
         // S53 V wide

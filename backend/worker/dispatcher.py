@@ -17,7 +17,7 @@ from .worker_pool import WorkerPool
 
 logger = logging.getLogger(__name__)
 
-WORKER_TIMEOUT = 30.0  # seconds
+WORKER_TIMEOUT = 60.0  # seconds
 
 
 async def dispatcher_loop(
