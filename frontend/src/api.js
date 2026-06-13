@@ -76,11 +76,11 @@ export async function getJobResult(jobId) {
 
 /**
  * Poll /status every 1 000 ms until done or error, then fetch the result.
- * Throws if the job does not complete within 35 seconds.
+ * Throws if the job does not complete within 65 seconds.
  */
 export async function pollJobResult(jobId) {
   const INTERVAL_MS = 1000
-  const MAX_WAIT_MS = 35_000
+  const MAX_WAIT_MS = 65_000
   const deadline    = Date.now() + MAX_WAIT_MS
 
   while (Date.now() < deadline) {

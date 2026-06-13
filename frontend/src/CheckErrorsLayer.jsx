@@ -190,7 +190,7 @@ function drawSlurBracketPair(g, error, map, color, { onlySecond = false } = {}) 
         x: Math.round(bx + BASE_BRACKET_RADIUS - 2),
         y: Math.round(mid + 5),
         fill: color, stroke: 'none',
-        'font-size': 16, 'font-weight': '700',
+        'font-size': 13, 'font-weight': '700',
         'font-family': 'Arial, sans-serif', 'text-anchor': 'start',
       })
       labelEl.textContent = String(error.interval)
@@ -419,7 +419,7 @@ function renderBassLineMarker(g, error, map) {
 
     const labelX = (x1 + x2) / 2
     const labelY = 0.5 * (y1 + y2) + 0.75 * BASS_ARC_SAG + 12
-    addText(g, labelX, labelY, getLabel(), color, 14, true)
+    addText(g, labelX, labelY, getLabel(), color, 13, true)
   })
 }
 

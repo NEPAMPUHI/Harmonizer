@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 
 const CHECK_ERROR_LABELS = {
   UnknownChord:                       'невідомий акорд',
@@ -23,53 +23,75 @@ function getCheckErrorLabel(error) {
   return CHECK_ERROR_LABELS[error.code] || error.message || error.code || '?'
 }
 
+const AUTO_CLOSE_DELAY = 3000   // ms to wait before starting fade
+const FADE_DURATION    = 1000   // ms of fade animation
+
 export default function CheckResultIndicator({
   checkErrors,
   highlightedCheckErrorIndex,
   onSetHighlightedIndex,
 }) {
-  const [popupOpen,  setPopupOpen]  = useState(false)
-  const [isClosing,  setIsClosing]  = useState(false)
-  const buttonRef    = useRef(null)
-  const popupRef     = useRef(null)
-  const closeTimerRef = useRef(null)
-  const fadeTimerRef  = useRef(null)
+  const [popupOpen,    setPopupOpen]    = useState(false)
+  const [isAutoFading, setIsAutoFading] = useState(false)
 
-  function startAutoClose() {
-    clearTimeout(closeTimerRef.current)
+  const buttonRef      = useRef(null)
+  const popupRef       = useRef(null)
+  const waitTimerRef   = useRef(null)   // fires after AUTO_CLOSE_DELAY → starts fade
+  const fadeTimerRef   = useRef(null)   // fires after FADE_DURATION → unmounts popup
+  const isAutoOpenRef  = useRef(false)  // true only when popup was opened by check result
+
+  // Match popup width to the .btn-check button whenever popup opens.
+  useLayoutEffect(() => {
+    if (!popupOpen || !popupRef.current) return
+    const btn = document.querySelector('.btn-check')
+    if (!btn) return
+    const { width } = btn.getBoundingClientRect()
+    if (width > 0) {
+      const w = `${Math.round(width)}px`
+      popupRef.current.style.width    = w
+      popupRef.current.style.minWidth = w
+      popupRef.current.style.maxWidth = w
+    }
+  }, [popupOpen])
+
+  function clearTimers() {
+    clearTimeout(waitTimerRef.current)
     clearTimeout(fadeTimerRef.current)
-    closeTimerRef.current = setTimeout(() => {
-      setIsClosing(true)
+  }
+
+  // Start the countdown: wait → fade → close.
+  // Resets any in-progress timers first; also cancels an ongoing fade.
+  function scheduleAutoClose() {
+    clearTimers()
+    setIsAutoFading(false)
+    waitTimerRef.current = setTimeout(() => {
+      setIsAutoFading(true)
       fadeTimerRef.current = setTimeout(() => {
         setPopupOpen(false)
-        setIsClosing(false)
-      }, 1000)
-    }, 5000)
+        setIsAutoFading(false)
+      }, FADE_DURATION)
+    }, AUTO_CLOSE_DELAY)
   }
 
-  function closeWithFade() {
-    clearTimeout(closeTimerRef.current)
-    clearTimeout(fadeTimerRef.current)
-    setIsClosing(true)
-    fadeTimerRef.current = setTimeout(() => {
-      setPopupOpen(false)
-      setIsClosing(false)
-    }, 1000)
+  // Close immediately with no animation (manual action).
+  function closeNow() {
+    clearTimers()
+    setIsAutoFading(false)
+    setPopupOpen(false)
   }
 
+  // New check result → open and start auto-close countdown.
   useEffect(() => {
     if (checkErrors === null) return
-    clearTimeout(closeTimerRef.current)
-    clearTimeout(fadeTimerRef.current)
-    setIsClosing(false)
+    clearTimers()
+    setIsAutoFading(false)
+    isAutoOpenRef.current = true
     setPopupOpen(true)
-    startAutoClose()
-    return () => {
-      clearTimeout(closeTimerRef.current)
-      clearTimeout(fadeTimerRef.current)
-    }
+    scheduleAutoClose()
+    return clearTimers
   }, [checkErrors])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Click outside → close immediately, no animation.
   useEffect(() => {
     if (!popupOpen) return
     function handler(e) {
@@ -77,23 +99,35 @@ export default function CheckResultIndicator({
         !buttonRef.current?.contains(e.target) &&
         !popupRef.current?.contains(e.target)
       ) {
-        closeWithFade()
+        closeNow()
       }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [popupOpen])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Toggle button → manual open/close, no animation, no auto-close.
   function handleButtonClick(e) {
     e.stopPropagation()
     if (popupOpen) {
-      closeWithFade()
+      closeNow()
     } else {
-      clearTimeout(closeTimerRef.current)
-      clearTimeout(fadeTimerRef.current)
-      setIsClosing(false)
+      clearTimers()
+      setIsAutoFading(false)
+      isAutoOpenRef.current = false
       setPopupOpen(true)
     }
+  }
+
+  // Hovering over popup → cancel any pending auto-close / in-progress fade.
+  function handleMouseEnter() {
+    clearTimers()
+    setIsAutoFading(false)
+  }
+
+  // Leaving popup → restart the countdown only for auto-opened popups.
+  function handleMouseLeave() {
+    if (isAutoOpenRef.current) scheduleAutoClose()
   }
 
   if (checkErrors === null) return null
@@ -117,9 +151,11 @@ export default function CheckResultIndicator({
           className={[
             'check-result-popup',
             hasErrors ? 'fail' : 'ok',
-            isClosing  ? 'closing' : '',
+            isAutoFading ? 'auto-fading' : '',
           ].filter(Boolean).join(' ')}
           onMouseDown={e => e.stopPropagation()}
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeave}
         >
           <div className="check-result-popup-header">
             Знайдено помилок: {checkErrors.length}

@@ -436,20 +436,31 @@ export default function Home() {
 
   // Adds the harmonic position key for note with given ID to the dismissed set.
   // Must be called BEFORE the note is removed/mutated (measuresRef is still current).
+  // Works in both check mode (note has positionTick) and harmonize mode (tick is
+  // computed as the cumulative sum of preceding notes, matching annotateForCheck).
   function dismissCheckForNote(noteId) {
     if (checkErrors === null || !noteId) return
     const ms = measuresRef.current
     for (let mi = 0; mi < ms.length; mi++) {
       for (const clef of ['treble', 'bass']) {
-        const note = ms[mi]?.[clef]?.find(n => n.id === noteId)
-        if (note?.positionTick != null) {
-          const k = `${mi}:${note.positionTick}`
-          setDismissedCheckPositions(prev => {
-            if (prev.has(k)) return prev
-            const next = new Set(prev); next.add(k); return next
-          })
-          return
+        const notes = ms[mi]?.[clef]
+        if (!notes) continue
+        const noteIdx = notes.findIndex(n => n.id === noteId)
+        if (noteIdx === -1) continue
+        const note = notes[noteIdx]
+        let tick = note.positionTick
+        if (tick == null) {
+          tick = 0
+          for (let i = 0; i < noteIdx; i++) {
+            tick = Math.round((tick + noteTicks(notes[i])) * 10000) / 10000
+          }
         }
+        const k = `${mi}:${tick}`
+        setDismissedCheckPositions(prev => {
+          if (prev.has(k)) return prev
+          const next = new Set(prev); next.add(k); return next
+        })
+        return
       }
     }
   }
@@ -624,6 +635,7 @@ export default function Home() {
         if (isMovable) break
       }
       if (!isMovable) return
+      dismissCheckForNote(selectedNoteId)
       pushUndo()
       setMeasures(prev => {
         for (let mIdx = 0; mIdx < prev.length; mIdx++) {
@@ -736,6 +748,7 @@ export default function Home() {
   // ── Set absolute pitch of a note (called on every mousemove during drag) ─
   // Undo is pushed by Staff via onNoteDragStart, not here.
   function setNotePitch(id, newPitch, newOctave) {
+    dismissCheckForNote(id)
     setMeasures(prev => {
       for (let mIdx = 0; mIdx < prev.length; mIdx++) {
         for (const clef of ['treble', 'bass']) {
@@ -1709,6 +1722,9 @@ export default function Home() {
     setHarmonizeError(null)
     setUiState('editing')
     savedCheckMeasuresRef.current = null
+    setCheckErrors(null)
+    setHighlightedCheckErrorIndex(null)
+    setDismissedCheckPositions(new Set())
   }
 
   function exportJson() {
@@ -1814,6 +1830,9 @@ export default function Home() {
     setHarmonizeVariants([])
     setHarmonizeError(null)
     setSelectedVariantIdx(0)
+    setCheckErrors(null)
+    setHighlightedCheckErrorIndex(null)
+    setDismissedCheckPositions(new Set())
     setUiState('editing')
     setMode('check')
   }
@@ -2169,6 +2188,7 @@ export default function Home() {
             totalTicks={totalTicks}
             playbackState={playbackState}
             checkErrors={mode === 'check' ? checkErrors : null}
+            dismissedCheckPositions={mode === 'check' ? dismissedCheckPositions : null}
             highlightedCheckErrorIndex={mode === 'check' ? highlightedCheckErrorIndex : null}
             onSetHighlightedCheckErrorIndex={setHighlightedCheckErrorIndex}
             isLoading={isChecking || isHarmonizing}
