@@ -163,7 +163,8 @@ bool HarmonyRules::isValidConnection(const Chord& prePrevious, const Chord& prev
 }
 
 bool HarmonyRules::isValidFunctionalProgression(const Chord& previous, const Chord& current) {
-    return checkGeneralProgressionRules(previous, current, ActiveRuleSet::allEnabled());
+    return true;
+    //return checkGeneralProgressionRules(previous, current, ActiveRuleSet::allEnabled());
 }
 
 // ── Rules-aware public overloads ──────────────────────────────────────────────

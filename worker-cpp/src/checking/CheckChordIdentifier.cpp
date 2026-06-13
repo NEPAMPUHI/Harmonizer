@@ -79,6 +79,14 @@ CheckChordIdentifier::identify(const std::vector<CheckHarmonicPosition>& positio
         // strong/medium beats; T64 only on weak beats. When K64 matches but the
         // position is a weak beat, skip it so the loop continues to T64.
         for (const auto& tmpl : allTemplates) {
+            // Skip templates whose bass degree doesn't match the actual bass note.
+            // Without this, templates with matching upper-voice degrees but wrong bass
+            // degree would steal the match (voiceBassChords passes the actual bass
+            // note directly, so the bass always matches in tryMatch regardless of d[3]).
+            if (pos.bass.getDegree() > 0
+                && tmpl.degreesInSatbOrder[3] != pos.bass.getDegree())
+                continue;
+
             auto cands = builder.createChordsFromTemplate(
                 pos.bass, tmpl, HarmonizationMode::HarmonizeBass, settings);
             if (tryMatch(cands, pos, item, tmpl)) {
