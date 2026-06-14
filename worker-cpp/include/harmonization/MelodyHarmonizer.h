@@ -24,8 +24,7 @@ public:
 private:
     std::vector<HarmonizationVariant> harmonizePlan(
         const HarmonicRhythmPlan& plan,
-        const HarmonizationSettings& settings,
-        int planIndex);
+        const HarmonizationSettings& settings);
 
     std::vector<std::vector<Chord>> buildChordsByPosition(
         const std::vector<HarmonicPosition>& positions,

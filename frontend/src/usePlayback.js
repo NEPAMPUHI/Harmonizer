@@ -45,10 +45,11 @@ export function usePlayback({ measures, timeSignature, tonality, anacruisTicks, 
   const [currentTick,   setCurrentTick]   = useState(0)
 
   // Refs so RAF callbacks always see fresh values without stale closures
-  const rafRef         = useRef(null)
-  const lastTimeRef    = useRef(null)    // null = "not yet started in this play session"
-  const currentTickRef = useRef(0)
-  const audioRef       = useRef(new AudioScheduler())
+  const rafRef            = useRef(null)
+  const lastTimeRef       = useRef(null)    // null = "not yet started in this play session"
+  const currentTickRef    = useRef(0)
+  const audioRef          = useRef(new AudioScheduler())
+  const warmupTimeoutRef  = useRef(null)
 
   // Build timeline and total length only when score content changes
   const timeline = useMemo(
@@ -136,22 +137,52 @@ export function usePlayback({ measures, timeSignature, tonality, anacruisTicks, 
     return () => cancelAnimationFrame(rafRef.current)
   }, [playbackState, totalTicks, bpm])
 
+  // Cleanup warmup timeout and audio on unmount.
+  useEffect(() => {
+    return () => {
+      if (warmupTimeoutRef.current) clearTimeout(warmupTimeoutRef.current)
+      audioRef.current.reset()
+    }
+  }, [])
+
   // ── Handlers ─────────────────────────────────────────────────────
 
   function play() {
     if (playbackState === 'playing') return
-    // reset() clears _scheduled so the upcoming scheduleFromResume starts clean
+    if (warmupTimeoutRef.current) return  // already warming up
+    const isNew = !audioRef.current.isInitialized
     audioRef.current.reset()
-    setPlaybackState('playing')
+    if (isNew) {
+      // Pre-warm AudioContext here (inside user gesture handler) so Chrome
+      // doesn't auto-suspend it. Then delay actual playback start by 1 second
+      // to let the audio hardware fully initialize — otherwise the first ~1 s
+      // of notes is silent.
+      audioRef.current.ensureStarted()
+      warmupTimeoutRef.current = setTimeout(() => {
+        warmupTimeoutRef.current = null
+        setPlaybackState('playing')
+      }, 1000)
+    } else {
+      setPlaybackState('playing')
+    }
   }
 
   function pause() {
+    if (warmupTimeoutRef.current) {
+      clearTimeout(warmupTimeoutRef.current)
+      warmupTimeoutRef.current = null
+      return
+    }
     if (playbackState !== 'playing') return
     audioRef.current.stopAll()
     setPlaybackState('paused')
   }
 
   function stop() {
+    if (warmupTimeoutRef.current) {
+      clearTimeout(warmupTimeoutRef.current)
+      warmupTimeoutRef.current = null
+    }
     cancelAnimationFrame(rafRef.current)
     audioRef.current.reset()
     currentTickRef.current = 0

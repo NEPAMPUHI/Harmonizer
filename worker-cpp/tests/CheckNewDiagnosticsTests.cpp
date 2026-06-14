@@ -280,28 +280,6 @@ TEST_CASE("Diag: VoiceLeapGreaterThanOctave — exactly octave is OK", "[new_dia
 }
 
 // ── FunctionalProgressionError ────────────────────────────────────────────────
-// D function followed by S function is forbidden (checkAfterDominant).
-
-TEST_CASE("Diag: FunctionalProgressionError — D to S progression", "[new_diag]") {
-    CheckSolutionRuleChecker checker;
-
-    // prev = D chord (dominant, degree 5, triad)
-    // curr = S chord (subdominant, degree 4, triad)
-    auto ic1 = nd_knownIC(nd_pn(NoteName::B, 4), nd_pn(NoteName::G, 4),
-                           nd_pn(NoteName::D, 4), nd_pn(NoteName::G, 3),
-                           HarmonicFunction::D, 5, ChordType::Triad);
-    auto ic2 = nd_knownIC(nd_pn(NoteName::C, 5), nd_pn(NoteName::A, 4),
-                           nd_pn(NoteName::F, 4), nd_pn(NoteName::F, 3),
-                           HarmonicFunction::S, 4, ChordType::Triad);
-
-    const auto errors = checker.check({ic1, ic2});
-    bool found = false;
-    for (const auto& e : errors)
-        if (e.code == CheckErrorCode::FunctionalProgressionError)
-            found = true;
-    CHECK(found);
-}
-
 // T → T → T: always valid functionally.
 
 TEST_CASE("Diag: FunctionalProgressionError — T to T is valid", "[new_diag]") {

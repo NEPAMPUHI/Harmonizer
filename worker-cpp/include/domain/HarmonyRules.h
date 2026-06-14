@@ -54,6 +54,15 @@ public:
     static bool checkInitialChordByBass(const Chord& current, const Note& fixedNote,
                                         const HarmonicPosition& position, int firstPositionIndex);
 
+    // First position of the last measure: constrains chord choice based on the
+    // fixed voice degree (soprano or bass) at that position.
+    static bool checkFirstChordOfLastMeasureByFixedNote(const Chord& current, const Note& fixedNote,
+                                                         const HarmonicPosition& position,
+                                                         int firstPositionOfLastMeasureIndex);
+    static bool checkFirstChordOfLastMeasureByBass(const Chord& current, const Note& fixedNote,
+                                                    const HarmonicPosition& position,
+                                                    int firstPositionOfLastMeasureIndex);
+
 private:
     static bool checkVoiceRangeRules(const Chord& current);
     static bool checkVoiceSpacingRules(const Chord& current);

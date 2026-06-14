@@ -116,6 +116,10 @@ export class AudioScheduler {
 
   // ── Context ────────────────────────────────────────────────────────
 
+  get isInitialized() {
+    return this._ctx !== null && this._ctx.state !== 'closed'
+  }
+
   ensureStarted() {
     if (!this._ctx || this._ctx.state === 'closed') {
       this._ctx        = new (window.AudioContext || window.webkitAudioContext)()

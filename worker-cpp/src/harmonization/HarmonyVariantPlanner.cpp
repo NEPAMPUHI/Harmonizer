@@ -19,22 +19,22 @@ int HarmonyVariantPlanner::calculateNodePriority(const HarmonyGraphNode& node) c
     int priority = 0;
 
     switch (node.chord.getType()) {
-        case ChordType::Triad:            priority += 0;  break;
+        case ChordType::Triad:            priority += 10;  break;
         case ChordType::Six:              priority += 10; break;
-        case ChordType::SixFour:          priority += 10; break;
+        case ChordType::SixFour:          priority += 11; break;
         case ChordType::CadentialSixFour: priority += 15; break;
-        case ChordType::Seventh:          priority += 20; break;
-        case ChordType::SixFive:          priority += 22; break;
-        case ChordType::FourThree:        priority += 22; break;
-        case ChordType::Two:              priority += 25; break;
-        case ChordType::Ninth:            priority += 30; break;
+        case ChordType::Seventh:          priority += 9; break;
+        case ChordType::SixFive:          priority += 8; break;
+        case ChordType::FourThree:        priority += 7; break;
+        case ChordType::Two:              priority += 5; break;
+        case ChordType::Ninth:            priority += 7; break;
     }
 
     switch (node.chord.getDegree()) {
-        case 2: priority += 14; break;
-        case 3: priority += 8; break;
-        case 6: priority += 14; break;
-        case 7: priority += 15; break;
+        case 2: priority += 0; break;
+        case 3: priority += 0; break;
+        case 6: priority += 0; break;
+        case 7: priority += 0; break;
         default: break;
     }
 

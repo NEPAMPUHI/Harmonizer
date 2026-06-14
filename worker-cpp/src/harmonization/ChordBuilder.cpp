@@ -76,8 +76,8 @@ PitchClass degreeToNote(int degree, const std::string& key,
 
 // ── single-note placement helpers ────────────────────────────────────────────
 
-// Highest valid note of (name,alter,degree) at or below ceilingSemitone within range.
-// Falls back to lowest in range if nothing fits at or below ceiling.
+// Highest note of (name,alter,degree) at or below ceilingSemitone.
+// Prefers notes within range; falls back to out-of-range if nothing fits in range.
 Note fitInRange(NoteName name, int alter, int degree,
                 const VoiceRange& range, int ceilingSemitone) {
     for (int oct = 9; oct >= 0; --oct) {
@@ -85,15 +85,16 @@ Note fitInRange(NoteName name, int alter, int degree,
         if (candidate.getSemitone() <= ceilingSemitone && range.contains(candidate))
             return candidate;
     }
-    for (int oct = 0; oct <= 9; ++oct) {
+    for (int oct = 9; oct >= 0; --oct) {
         Note candidate(name, oct, alter, degree, 4, false);
-        if (range.contains(candidate)) return candidate;
+        if (candidate.getSemitone() <= ceilingSemitone)
+            return candidate;
     }
     return Note(name, range.min.getOctave(), alter, degree, 4, false);
 }
 
-// Lowest valid note of (name,alter,degree) at or above floorSemitone within range.
-// Falls back to lowest in range if nothing fits at or above floor.
+// Lowest note of (name,alter,degree) at or above floorSemitone.
+// Prefers notes within range; falls back to out-of-range if nothing fits in range.
 Note fitAbove(NoteName name, int alter, int degree,
               const VoiceRange& range, int floorSemitone) {
     for (int oct = 0; oct <= 9; ++oct) {
@@ -103,14 +104,16 @@ Note fitAbove(NoteName name, int alter, int degree,
     }
     for (int oct = 0; oct <= 9; ++oct) {
         Note candidate(name, oct, alter, degree, 4, false);
-        if (range.contains(candidate)) return candidate;
+        if (candidate.getSemitone() >= floorSemitone)
+            return candidate;
     }
     return Note(name, range.max.getOctave(), alter, degree, 4, false);
 }
 
 // ── multi-note placement helpers ─────────────────────────────────────────────
 
-// All valid notes at or below ceiling within range, descending (highest first).
+// All notes at or below ceiling, descending (highest first).
+// Prefers in-range notes; if none, falls back to out-of-range candidates.
 std::vector<Note> fitAllInRange(NoteName name, int alter, int degree,
                                 const VoiceRange& range, int ceilingSemitone) {
     std::vector<Note> result;
@@ -119,10 +122,18 @@ std::vector<Note> fitAllInRange(NoteName name, int alter, int degree,
         if (candidate.getSemitone() <= ceilingSemitone && range.contains(candidate))
             result.push_back(candidate);
     }
+    if (result.empty()) {
+        for (int oct = 9; oct >= 0; --oct) {
+            Note candidate(name, oct, alter, degree, 4, false);
+            if (candidate.getSemitone() <= ceilingSemitone)
+                result.push_back(candidate);
+        }
+    }
     return result;
 }
 
-// All valid notes at or above floor within range, ascending (lowest/nearest first).
+// All notes at or above floor, ascending (lowest/nearest first).
+// Prefers in-range notes; if none, falls back to out-of-range candidates.
 std::vector<Note> fitAllAbove(NoteName name, int alter, int degree,
                                const VoiceRange& range, int floorSemitone) {
     std::vector<Note> result;
@@ -131,7 +142,25 @@ std::vector<Note> fitAllAbove(NoteName name, int alter, int degree,
         if (candidate.getSemitone() >= floorSemitone && range.contains(candidate))
             result.push_back(candidate);
     }
+    if (result.empty()) {
+        for (int oct = 0; oct <= 9; ++oct) {
+            Note candidate(name, oct, alter, degree, 4, false);
+            if (candidate.getSemitone() >= floorSemitone)
+                result.push_back(candidate);
+        }
+    }
     return result;
+}
+
+// Rules used when validating chords during building: all checks except voice ranges,
+// which are deferred to graph-level validation where the active rule set is known.
+const ActiveRuleSet& buildTimeRules() {
+    static const ActiveRuleSet r = []{
+        auto x = ActiveRuleSet::allEnabled();
+        x.voiceRanges = false;
+        return x;
+    }();
+    return r;
 }
 
 // ── position-aware adjacency rules ───────────────────────────────────────────
@@ -182,7 +211,7 @@ std::vector<Chord> voiceMelodyChords(const Note& soprano, const ChordTemplate& t
     std::vector<Chord> result;
     for (const Note& bass : bassCandidates) {
         Chord chord(soprano, alto, tenor, bass, tmpl);
-        if (HarmonyRules::isValidChord(chord))
+        if (HarmonyRules::isValidChord(chord, buildTimeRules()))
             result.push_back(chord);
     }
     return result;
@@ -218,7 +247,7 @@ std::vector<Chord> voiceBassChords(const Note& bass, const ChordTemplate& tmpl,
         if (soprano.getSemitone() < sopranoFloor) continue;  // no valid soprano ≥ alto: skip this tenor
 
         Chord chord(soprano, alto, tenor, bass, tmpl);
-        if (HarmonyRules::isValidChord(chord))
+        if (HarmonyRules::isValidChord(chord, buildTimeRules()))
             result.push_back(chord);
     }
     return result;

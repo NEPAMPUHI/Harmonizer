@@ -33,53 +33,20 @@ bool noteIdentical(const FrontendNote& a, const FrontendNote& b) {
 // Used for the fixed voice (soprano or bass).
 std::vector<FrontendNote> mergeFixed(
     const std::vector<FrontendNote>& notes,
-    const std::vector<int>&          srcIdx)
+    const std::vector<int>&          /*srcIdx*/)
 {
-    std::vector<FrontendNote> result;
-    size_t i = 0;
-    while (i < notes.size()) {
-        FrontendNote merged = notes[i];
-        merged.tiedToNext = false;
-        if (srcIdx[i] >= 0) {
-            size_t j = i + 1;
-            while (j < notes.size() && srcIdx[j] == srcIdx[i])
-                merged.durationSixteenths += notes[j++].durationSixteenths;
-            applyDurationToFrontendNote(merged.durationSixteenths, merged);
-            result.push_back(merged);
-            i = j;
-        } else {
-            result.push_back(merged);
-            ++i;
-        }
-    }
-    return result;
+    // TODO: merging temporarily disabled
+    return std::vector<FrontendNote>(notes.begin(), notes.end());
 }
 
 // Merge consecutive notes with identical pitch (non-rests only).
 // chordTicks[i] = within-measure start (sixteenths) of notes[i]; used to verify adjacency.
 std::vector<FrontendNote> mergeByPitch(
     const std::vector<FrontendNote>& notes,
-    const std::vector<int>&          chordTicks)
+    const std::vector<int>&          /*chordTicks*/)
 {
-    std::vector<FrontendNote> result;
-    size_t i = 0;
-    while (i < notes.size()) {
-        FrontendNote merged = notes[i];
-        size_t j = i + 1;
-        int expectedTick = chordTicks[i] + notes[i].durationSixteenths;
-        while (j < notes.size()
-            && pitchEqual(notes[i], notes[j])
-            && chordTicks[j] == expectedTick)
-        {
-            merged.durationSixteenths += notes[j].durationSixteenths;
-            expectedTick             += notes[j].durationSixteenths;
-            ++j;
-        }
-        applyDurationToFrontendNote(merged.durationSixteenths, merged);
-        result.push_back(merged);
-        i = j;
-    }
-    return result;
+    // TODO: merging temporarily disabled
+    return std::vector<FrontendNote>(notes.begin(), notes.end());
 }
 
 } // namespace

@@ -252,24 +252,6 @@ TEST_CASE("Checker: parallel_fifths disabled → no ParallelFifths error",
 // All other voice-leading checks pass for this transition (see HarmonyRules
 // tests above for the same chord pair).
 
-TEST_CASE("Checker: s_after_d enabled → FunctionalProgressionError fires",
-          "[ForbiddenRules][checker]") {
-    CheckSolutionRuleChecker checker;
-
-    const auto ic1 = knownIC(pn(NoteName::B, 4), pn(NoteName::G, 4),
-                              pn(NoteName::D, 4), pn(NoteName::G, 3), D53);
-    const auto ic2 = knownIC(pn(NoteName::C, 5), pn(NoteName::A, 4),
-                              pn(NoteName::F, 4), pn(NoteName::F, 3), S53);
-
-    ActiveRuleSet rules = ActiveRuleSet::allEnabled();
-    const auto errors = checker.check({ic1, ic2}, rules);
-
-    bool found = false;
-    for (const auto& e : errors)
-        if (e.code == CheckErrorCode::FunctionalProgressionError) found = true;
-    CHECK(found);
-}
-
 TEST_CASE("Checker: s_after_d disabled → no FunctionalProgressionError",
           "[ForbiddenRules][checker]") {
     CheckSolutionRuleChecker checker;

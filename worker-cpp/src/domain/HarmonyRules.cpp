@@ -715,6 +715,33 @@ bool HarmonyRules::checkFinalChordByBass(const Chord& current, const Note& fixed
         && current.getType() == ChordType::Triad;
 }
 
+bool HarmonyRules::checkFirstChordOfLastMeasureByFixedNote(
+    const Chord& current, const Note& fixedNote,
+    const HarmonicPosition& position, int firstPositionOfLastMeasureIndex)
+{
+    if (position.index != firstPositionOfLastMeasureIndex) return true;
+
+    const int fixedDegree = normalizeDegree(fixedNote.getDegree());
+    if (fixedDegree != 1 && fixedDegree != 3) return true;
+
+    return current.getFunction() == HarmonicFunction::T
+        && current.getDegree() == 1
+        && current.getType() == ChordType::Triad;
+}
+
+bool HarmonyRules::checkFirstChordOfLastMeasureByBass(
+    const Chord& current, const Note& fixedNote,
+    const HarmonicPosition& position, int firstPositionOfLastMeasureIndex)
+{
+    if (position.index != firstPositionOfLastMeasureIndex) return true;
+
+    if (normalizeDegree(fixedNote.getDegree()) != 1) return true;
+
+    return current.getFunction() == HarmonicFunction::T
+        && current.getDegree() == 1
+        && current.getType() == ChordType::Triad;
+}
+
 bool HarmonyRules::checkSixFourBeatRule(const Chord& current, const HarmonicPosition& position) {
     return checkSixFourBeatRule(current, position, ActiveRuleSet::allEnabled());
 }

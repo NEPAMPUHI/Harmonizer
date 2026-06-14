@@ -128,9 +128,7 @@ std::vector<HarmonicRhythmPlan> HarmonicRhythmPlanner::buildPlans(
     const HarmonizationSettings& settings)
 {
     const auto spans = buildTieSpans(notes);
-    const int  limit = std::max(1, settings.maxHarmonicRhythmPlans);
-
-    std::vector<HarmonicRhythmPlan> plans = { HarmonicRhythmPlan{} };
+    HarmonicRhythmPlan plan;
 
     int absoluteStart = 0;
     for (const TieSpan& span : spans) {
@@ -138,37 +136,11 @@ std::vector<HarmonicRhythmPlan> HarmonicRhythmPlanner::buildPlans(
             span.totalDuration, absoluteStart, settings);
         absoluteStart += span.totalDuration;
 
-        if (patterns.size() == 1) {
-            // Fast path: no branching — extend all existing plans in-place.
-            auto segs = makeSegments(span, patterns.front());
-            for (auto& plan : plans)
-                plan.segments.insert(plan.segments.end(), segs.begin(), segs.end());
-        } else {
-            // Branching: for each existing plan create one copy per pattern.
-            // Plans are enumerated depth-first so earlier (higher-priority) patterns
-            // come first in the output, respecting the priority order from
-            // getAllowedSplitPatterns.
-            std::vector<HarmonicRhythmPlan> next;
-            next.reserve(std::min<size_t>(
-                static_cast<size_t>(plans.size()) * patterns.size(), limit));
-
-            for (const auto& plan : plans) {
-                for (int pi = 0; pi < static_cast<int>(patterns.size()); ++pi) {
-                    if (static_cast<int>(next.size()) >= limit) break;
-                    HarmonicRhythmPlan branch = plan;
-                    branch.priorityScore += pi * 10;
-                    auto segs = makeSegments(span, patterns[pi]);
-                    branch.segments.insert(branch.segments.end(),
-                                           segs.begin(), segs.end());
-                    next.push_back(std::move(branch));
-                }
-                if (static_cast<int>(next.size()) >= limit) break;
-            }
-            plans = std::move(next);
-        }
+        auto segs = makeSegments(span, patterns.front());
+        plan.segments.insert(plan.segments.end(), segs.begin(), segs.end());
     }
 
-    return plans;
+    return { std::move(plan) };
 }
 
 // ── buildSegments ─────────────────────────────────────────────────────────────

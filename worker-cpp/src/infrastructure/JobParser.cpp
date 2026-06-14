@@ -66,7 +66,6 @@ HarmonizationSettings JobParser::parseSettings(const json& s, HarmonizationMode 
         settings.allowedChords.push_back(c.get<std::string>());
 
     settings.splitLongNotesByBasePulse = s.value("splitLongNotesByBasePulse", false);
-    settings.maxHarmonicRhythmPlans    = s.value("maxHarmonicRhythmPlans", 16);
 
     return settings;
 }

@@ -17,9 +17,10 @@ public:
         const std::vector<Note>& notes,
         const HarmonizationSettings& settings);
 
-    // Returns one or more HarmonicRhythmPlans for the same input.
-    // Currently yields exactly one plan (built from buildSegments), but the
-    // API is designed to support multiple alternative plans in the future.
+    // Returns exactly one HarmonicRhythmPlan: each note (or tied-note span)
+    // maps to one or more segments using the highest-priority split pattern.
+    // For a whole note in 4/4 at a measure boundary this is [4,4,8];
+    // for all other notes the segment equals the note duration.
     std::vector<HarmonicRhythmPlan> buildPlans(
         const std::vector<Note>& notes,
         const HarmonizationSettings& settings);

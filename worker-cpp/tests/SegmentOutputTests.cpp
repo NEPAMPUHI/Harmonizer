@@ -99,10 +99,10 @@ TEST_CASE("SegOut: split [4,4,8] segments share sourceNoteIndex 0", "[segment-ou
     HarmonicRhythmPlanner planner;
     auto settings = makeSettings4_4(true);
     auto plans    = planner.buildPlans({ mkNote(NoteName::C, 5, 16) }, settings);
-    REQUIRE(plans.size() >= 2);
+    REQUIRE(plans.size() == 1);
     HarmonicPositionBuilder builder;
     auto positions = builder.build(plans[0].segments, settings, HarmonizationMode::HarmonizeMelody);
-    REQUIRE(positions.size() == 3);  // [4,4,8]
+    REQUIRE(positions.size() == 3);  // cadence [4,4,8]
     CHECK(positions[0].sourceNoteIndex == 0);
     CHECK(positions[1].sourceNoteIndex == 0);
     CHECK(positions[2].sourceNoteIndex == 0);
@@ -112,26 +112,13 @@ TEST_CASE("SegOut: split [4,4,8] segment offsets are 0, 4, 8", "[segment-output]
     HarmonicRhythmPlanner planner;
     auto settings = makeSettings4_4(true);
     auto plans    = planner.buildPlans({ mkNote(NoteName::C, 5, 16) }, settings);
+    REQUIRE(plans.size() == 1);
     HarmonicPositionBuilder builder;
     auto positions = builder.build(plans[0].segments, settings, HarmonizationMode::HarmonizeMelody);
     REQUIRE(positions.size() == 3);
     CHECK(positions[0].offsetInFixedNoteSixteenths == 0);
     CHECK(positions[1].offsetInFixedNoteSixteenths == 4);
     CHECK(positions[2].offsetInFixedNoteSixteenths == 8);
-}
-
-TEST_CASE("SegOut: split [4,4,4,4] segment offsets are 0, 4, 8, 12", "[segment-output]") {
-    HarmonicRhythmPlanner planner;
-    auto settings = makeSettings4_4(true);
-    auto plans    = planner.buildPlans({ mkNote(NoteName::C, 5, 16) }, settings);
-    REQUIRE(plans.size() >= 2);
-    HarmonicPositionBuilder builder;
-    auto positions = builder.build(plans[1].segments, settings, HarmonizationMode::HarmonizeMelody);
-    REQUIRE(positions.size() == 4);  // [4,4,4,4]
-    CHECK(positions[0].offsetInFixedNoteSixteenths == 0);
-    CHECK(positions[1].offsetInFixedNoteSixteenths == 4);
-    CHECK(positions[2].offsetInFixedNoteSixteenths == 8);
-    CHECK(positions[3].offsetInFixedNoteSixteenths == 12);
 }
 
 // ── Score.fixedVoiceIndex ─────────────────────────────────────────────────────

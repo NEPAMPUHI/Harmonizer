@@ -37,7 +37,6 @@ static HarmonizationSettings settings44(int anacrusis = 0, int measureCount = 1)
     s.measureCount           = measureCount;
     s.key                    = "C";
     s.scaleModes             = {"major"};
-    s.maxHarmonicRhythmPlans = 16;
     return s;
 }
 
@@ -107,7 +106,6 @@ TEST_CASE("HarmonicRhythmValidator: unsupported beat type skips measure check", 
     s.measureCount           = 1;
     s.key                    = "C";
     s.scaleModes             = {"major"};
-    s.maxHarmonicRhythmPlans = 16;
     // Measure check is skipped; other checks pass.
     REQUIRE(v.validate(makePlan({makeSeg(0, 0, 4)}), {qNote(4)}, s).ok);
 }

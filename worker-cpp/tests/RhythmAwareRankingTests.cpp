@@ -9,7 +9,7 @@
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-static HarmonizationSettings makeS(bool split = false, int maxPlans = 16) {
+static HarmonizationSettings makeS(bool split = false) {
     HarmonizationSettings s;
     s.key = "C";
     s.scaleModes = {"natural", "harmonic", "melodic"};
@@ -19,7 +19,6 @@ static HarmonizationSettings makeS(bool split = false, int maxPlans = 16) {
     s.anacrusisSixteenths    = 0;
     s.measureCount           = 2;
     s.splitLongNotesByBasePulse = split;
-    s.maxHarmonicRhythmPlans    = maxPlans;
     return s;
 }
 
@@ -39,97 +38,72 @@ static std::string chordSeqKey(const HarmonizationVariant& v) {
     return key;
 }
 
-// ── HarmonicRhythmPlan::priorityScore ────────────────────────────────────────
+// ── HarmonicRhythmPlan struct ─────────────────────────────────────────────────
 
-TEST_CASE("RhythmRanking: HarmonicRhythmPlan default priorityScore is 0", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: HarmonicRhythmPlan default has no segments", "[rhythm-ranking]") {
     HarmonicRhythmPlan plan;
-    CHECK(plan.priorityScore == 0);
+    CHECK(plan.segments.empty());
 }
 
-TEST_CASE("RhythmRanking: single plan (no split) has priorityScore 0", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: single plan (no split) has exactly 1 plan", "[rhythm-ranking]") {
     HarmonicRhythmPlanner planner;
     auto plans = planner.buildPlans({ mkNote(NoteName::C, 5, 4) }, makeS(false));
     REQUIRE(plans.size() == 1);
-    CHECK(plans[0].priorityScore == 0);
 }
 
-TEST_CASE("RhythmRanking: cadence split — plan[0] priorityScore == 0", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: whole note at 4/4 boundary → 1 plan with cadence [4,4,8]", "[rhythm-ranking]") {
     HarmonicRhythmPlanner planner;
     auto plans = planner.buildPlans({ mkNote(NoteName::C, 5, 16) }, makeS(true));
-    REQUIRE(plans.size() >= 2);
-    CHECK(plans[0].priorityScore == 0);
+    REQUIRE(plans.size() == 1);
+    REQUIRE(plans[0].segments.size() == 3);
+    CHECK(plans[0].segments[0].durationSixteenths == 4);
+    CHECK(plans[0].segments[1].durationSixteenths == 4);
+    CHECK(plans[0].segments[2].durationSixteenths == 8);
 }
 
-TEST_CASE("RhythmRanking: cadence split — plan[1] priorityScore == 10", "[rhythm-ranking]") {
-    HarmonicRhythmPlanner planner;
-    auto plans = planner.buildPlans({ mkNote(NoteName::C, 5, 16) }, makeS(true));
-    REQUIRE(plans.size() >= 2);
-    CHECK(plans[1].priorityScore == 10);
-}
-
-TEST_CASE("RhythmRanking: plan[0] priorityScore never exceeds plan[1]", "[rhythm-ranking]") {
-    HarmonicRhythmPlanner planner;
-    auto plans = planner.buildPlans({ mkNote(NoteName::C, 5, 16) }, makeS(true));
-    REQUIRE(plans.size() >= 2);
-    CHECK(plans[0].priorityScore <= plans[1].priorityScore);
-}
-
-TEST_CASE("RhythmRanking: plans sequence is non-decreasing by priorityScore", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: two whole notes in 4/4 → 1 plan with 6 segments", "[rhythm-ranking]") {
     HarmonicRhythmPlanner planner;
     auto plans = planner.buildPlans(
         { mkNote(NoteName::C, 5, 16), mkNote(NoteName::E, 5, 16) }, makeS(true));
-    REQUIRE(plans.size() > 1);
-    for (int i = 1; i < static_cast<int>(plans.size()); ++i)
-        CHECK(plans[i].priorityScore >= plans[i-1].priorityScore);
+    REQUIRE(plans.size() == 1);
+    CHECK(plans[0].segments.size() == 6);
 }
 
-TEST_CASE("RhythmRanking: two branching spans accumulate priority correctly", "[rhythm-ranking]") {
-    HarmonicRhythmPlanner planner;
-    // Two whole notes in 4/4 at measure boundaries → 2×2 = 4 plans
-    auto plans = planner.buildPlans(
-        { mkNote(NoteName::C, 5, 16), mkNote(NoteName::E, 5, 16) }, makeS(true, 16));
-    REQUIRE(plans.size() == 4);
-    CHECK(plans[0].priorityScore ==  0);   // pattern[0] + pattern[0]
-    CHECK(plans[1].priorityScore == 10);   // pattern[0] + pattern[1]
-    CHECK(plans[2].priorityScore == 10);   // pattern[1] + pattern[0]
-    CHECK(plans[3].priorityScore == 20);   // pattern[1] + pattern[1]
-}
-
-// ── HarmonizationVariant::rhythmPlanPriority ─────────────────────────────────
+// ── HarmonizationVariant: rhythmPlanIndex and rhythmPlanPriority always 0 ────
 
 TEST_CASE("RhythmRanking: HarmonizationVariant default rhythmPlanPriority is 0", "[rhythm-ranking]") {
     HarmonizationVariant v;
     CHECK(v.rhythmPlanPriority == 0);
 }
 
-TEST_CASE("RhythmRanking: melody variants from plan[0] carry rhythmPlanPriority 0", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: melody variants always carry rhythmPlanIndex 0", "[rhythm-ranking]") {
     ScoreInput input;
     input.notes = { mkNote(NoteName::C, 5, 16) };
     MelodyHarmonizer harmonizer;
     auto variants = harmonizer.harmonize(input, makeS(true));
     REQUIRE_FALSE(variants.empty());
     for (const auto& v : variants)
-        if (v.rhythmPlanIndex == 0) CHECK(v.rhythmPlanPriority == 0);
+        CHECK(v.rhythmPlanIndex == 0);
 }
 
-TEST_CASE("RhythmRanking: melody variants from plan[1] carry rhythmPlanPriority 10", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: melody variants always carry rhythmPlanPriority 0", "[rhythm-ranking]") {
     ScoreInput input;
     input.notes = { mkNote(NoteName::C, 5, 16) };
     MelodyHarmonizer harmonizer;
     auto variants = harmonizer.harmonize(input, makeS(true));
     REQUIRE_FALSE(variants.empty());
     for (const auto& v : variants)
-        if (v.rhythmPlanIndex == 1) CHECK(v.rhythmPlanPriority == 10);
+        CHECK(v.rhythmPlanPriority == 0);
 }
 
-TEST_CASE("RhythmRanking: bass variants from plan[0] carry rhythmPlanPriority 0", "[rhythm-ranking]") {
+TEST_CASE("RhythmRanking: bass variants always carry rhythmPlanIndex 0", "[rhythm-ranking]") {
     ScoreInput input;
     input.notes = { mkNote(NoteName::G, 2, 16) };
     BassHarmonizer harmonizer;
     auto variants = harmonizer.harmonize(input, makeS(true));
     REQUIRE_FALSE(variants.empty());
     for (const auto& v : variants)
-        if (v.rhythmPlanIndex == 0) CHECK(v.rhythmPlanPriority == 0);
+        CHECK(v.rhythmPlanIndex == 0);
 }
 
 TEST_CASE("RhythmRanking: split=false → all variants have rhythmPlanPriority 0", "[rhythm-ranking]") {
@@ -200,25 +174,6 @@ TEST_CASE("RhythmRanking: output ordered by non-increasing score (bass)", "[rhyt
     REQUIRE_FALSE(variants.empty());
     for (size_t i = 1; i < variants.size(); ++i)
         CHECK(variants[i].score <= variants[i - 1].score);
-}
-
-TEST_CASE("RhythmRanking: within same rhythmPlanPriority score is non-increasing (melody)", "[rhythm-ranking]") {
-    ScoreInput input;
-    input.notes = { mkNote(NoteName::C, 5, 16) };
-    MelodyHarmonizer harmonizer;
-    auto variants = harmonizer.harmonize(input, makeS(true));
-    REQUIRE_FALSE(variants.empty());
-
-    int prevPriority = -1;
-    int prevScore    = INT_MAX;
-    for (const auto& v : variants) {
-        if (v.rhythmPlanPriority != prevPriority) {
-            prevPriority = v.rhythmPlanPriority;
-            prevScore    = INT_MAX;
-        }
-        CHECK(v.score <= prevScore);
-        prevScore = v.score;
-    }
 }
 
 TEST_CASE("RhythmRanking: split=false output score is non-increasing (melody)", "[rhythm-ranking]") {

@@ -41,3 +41,5 @@ Thumbs.db
 *.temp
 *.bak
 *.sw?
+load_test.py
+test_payload.py
